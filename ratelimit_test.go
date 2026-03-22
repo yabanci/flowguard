@@ -128,3 +128,41 @@ func TestTokenBucket_Reserve(t *testing.T) {
 		t.Fatal("expected positive duration when bucket is empty")
 	}
 }
+
+func TestSlidingWindow_Basic(t *testing.T) {
+	clk := newMockClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	rl := NewSlidingWindowLimiter(5, time.Second, WithRateLimiterClock(clk))
+
+	// should allow up to limit
+	for i := 0; i < 5; i++ {
+		if !rl.Allow() {
+			t.Fatalf("expected allow on call %d", i+1)
+		}
+	}
+
+	// 6th should fail
+	if rl.Allow() {
+		t.Fatal("should reject after limit")
+	}
+}
+
+func TestSlidingWindow_Expiry(t *testing.T) {
+	clk := newMockClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	rl := NewSlidingWindowLimiter(3, time.Second, WithRateLimiterClock(clk))
+
+	// fill up
+	for i := 0; i < 3; i++ {
+		rl.Allow()
+	}
+	if rl.Allow() {
+		t.Fatal("should be at limit")
+	}
+
+	// advance past the full window
+	clk.Advance(1100 * time.Millisecond)
+
+	// old counts should be gone
+	if !rl.Allow() {
+		t.Fatal("expected allow after window passed")
+	}
+}
