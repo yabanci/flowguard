@@ -78,6 +78,25 @@ func NewSlidingWindowLimiter(limit int, window time.Duration, opts ...RateLimite
 	return rl
 }
 
+// NewAIMDLimiter creates an adaptive rate limiter using Additive Increase,
+// Multiplicative Decrease — same idea as TCP congestion control.
+// On success the limit goes up by 1, on failure it gets halved.
+// initial/min/max define the range the limit can swing in.
+func NewAIMDLimiter(initial, min, max int, opts ...RateLimiterOption) *RateLimiter {
+	rl := &RateLimiter{
+		aimdCurrent: initial,
+		aimdMin:     min,
+		aimdMax:     max,
+		isAIMD:      true,
+		clock:       defaultClock{},
+		observer:    noopObserver{},
+	}
+	for _, opt := range opts {
+		opt(rl)
+	}
+	return rl
+}
+
 // Wait blocks until a token is available or ctx is cancelled.
 func (rl *RateLimiter) Wait(ctx context.Context) error {
 	for {
