@@ -101,6 +101,11 @@ func (r *Retry) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 
 		lastErr = err
 
+		// permanent errors should not be retried (used by Policy)
+		if _, ok := err.(*permanentError); ok {
+			return err
+		}
+
 		// don't retry context errors
 		if err == context.Canceled || err == context.DeadlineExceeded {
 			return err
