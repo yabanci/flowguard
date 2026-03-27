@@ -37,18 +37,22 @@ func NewPolicy(opts ...PolicyOption) *Policy {
 	return p
 }
 
+// WithPolicyRateLimiter adds a rate limiter to the policy.
 func WithPolicyRateLimiter(rl *RateLimiter) PolicyOption {
 	return func(p *Policy) { p.rl = rl }
 }
 
+// WithPolicyCircuitBreaker adds a circuit breaker to the policy.
 func WithPolicyCircuitBreaker(cb *CircuitBreaker) PolicyOption {
 	return func(p *Policy) { p.cb = cb }
 }
 
+// WithPolicyRetry adds retry logic to the policy.
 func WithPolicyRetry(r *Retry) PolicyOption {
 	return func(p *Policy) { p.retry = r }
 }
 
+// WithPolicyObserver attaches an observer to the policy itself.
 func WithPolicyObserver(o Observer) PolicyOption {
 	return func(p *Policy) { p.observer = o }
 }
@@ -57,52 +61,20 @@ func WithPolicyObserver(o Observer) PolicyOption {
 func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) error {
 	wrapped := fn
 
-	// wrap with rate limiter (innermost)
-	if p.rl != nil {
+	if p.cb != nil {
+		// when CB is present, buildCBWrapped handles RL internally
+		// so that rate limit rejections don't count as CB failures
+		wrapped = p.buildCBWrapped(fn)
+	} else if p.rl != nil {
+		// no CB — just wrap with rate limiter directly
 		inner := wrapped
 		wrapped = func(ctx context.Context) error {
 			if err := p.rl.Wait(ctx); err != nil {
 				p.observer.OnRateLimited()
-				return &rateLimitError{err}
+				return ErrRateLimited
 			}
 			return inner(ctx)
 		}
-	}
-
-	// wrap with circuit breaker
-	if p.cb != nil {
-		inner := wrapped
-		wrapped = func(ctx context.Context) error {
-			return p.cb.Do(ctx, func(ctx context.Context) error {
-				err := inner(ctx)
-				// unwrap rate limit errors so CB doesn't count them as failures
-				if isRateLimitErr(err) {
-					// still return the error to caller, but CB saw nil
-					// this is a bit of a hack but it works
-					return nil
-				}
-				return err
-			})
-		}
-
-		// hmm actually the above eats the rate limit error. let me fix that.
-		// we need to thread the rl error back out without CB seeing it
-		cbInner := wrapped
-		wrapped = func(ctx context.Context) error {
-			var rlErr error
-			err := cbInner(ctx)
-			if err != nil {
-				return err
-			}
-			// check if rate limiter failed — we stashed it
-			if rlErr != nil {
-				return rlErr
-			}
-			return nil
-		}
-
-		// OK this got too convoluted. Let me redo this properly.
-		wrapped = p.buildCBWrapped(fn)
 	}
 
 	// wrap with retry (outermost)
@@ -148,17 +120,7 @@ func (p *Policy) buildCBWrapped(fn func(ctx context.Context) error) func(ctx con
 	}
 }
 
-// --- helpers to prevent RL errors from tripping CB ---
-
-type rateLimitError struct{ inner error }
-
-func (e *rateLimitError) Error() string { return e.inner.Error() }
-func (e *rateLimitError) Unwrap() error { return e.inner }
-
-func isRateLimitErr(err error) bool {
-	_, ok := err.(*rateLimitError)
-	return ok
-}
+// --- error wrappers ---
 
 // permanentError wraps errors that retry should not retry
 type permanentError struct{ inner error }
