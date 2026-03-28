@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ["1.21", "1.22", "1.23"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Run tests
+        run: go test ./... -race -count=1 -coverprofile=coverage.out
+
+      - name: Upload coverage
+        if: matrix.go-version == '1.23'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Files not formatted:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Check go.mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Verify examples compile
+        run: |
+          go build ./examples/basic/
+          go build ./examples/http_client/
+          go build ./examples/adaptive/
+
+      - name: Verify zero dependencies
+        run: |
+          deps=$(go list -m all 2>/dev/null | wc -l)
+          if [ "$deps" -gt 1 ]; then
+            echo "Expected zero external dependencies, found:"
+            go list -m all
+            exit 1
+          fi
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run benchmarks
+        run: go test -bench=. -benchmem -count=3 ./benchmarks/ | tee bench.txt
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: bench.txt
