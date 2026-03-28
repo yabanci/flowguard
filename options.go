@@ -27,5 +27,5 @@ type Clock interface {
 
 type defaultClock struct{}
 
-func (defaultClock) Now() time.Time         { return time.Now() }
-func (defaultClock) Sleep(d time.Duration)  { time.Sleep(d) }
+func (defaultClock) Now() time.Time        { return time.Now() }
+func (defaultClock) Sleep(d time.Duration) { time.Sleep(d) }
