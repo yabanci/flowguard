@@ -161,7 +161,7 @@ func (r *Retry) applyJitter(d time.Duration) time.Duration {
 	// Full Jitter: sleep = random(0, d)
 	// But we scale by jitter factor so 0.2 means ±20%
 	jit := float64(d) * r.jitter
-	delta := (rand.Float64()*2 - 1) * jit // -jit to +jit
+	delta := (rand.Float64()*2 - 1) * jit //nolint:gosec // jitter doesn't need crypto rand
 	result := time.Duration(float64(d) + delta)
 	if result < 0 {
 		result = 0
