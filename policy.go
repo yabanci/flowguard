@@ -20,6 +20,9 @@ type Policy struct {
 	rl       *RateLimiter
 	cb       *CircuitBreaker
 	retry    *Retry
+	hedge    *Hedge
+	bulkhead *Bulkhead
+	fallback func(ctx context.Context, err error) error
 	observer Observer
 }
 
@@ -52,21 +55,46 @@ func WithPolicyRetry(r *Retry) PolicyOption {
 	return func(p *Policy) { p.retry = r }
 }
 
+// WithPolicyHedge adds hedged requests to the policy.
+func WithPolicyHedge(h *Hedge) PolicyOption {
+	return func(p *Policy) { p.hedge = h }
+}
+
+// WithPolicyBulkhead adds a bulkhead (concurrency limiter) to the policy.
+func WithPolicyBulkhead(b *Bulkhead) PolicyOption {
+	return func(p *Policy) { p.bulkhead = b }
+}
+
+// WithPolicyFallback sets a fallback function that runs when everything else fails.
+// The fallback receives the original error so it can decide what to do.
+func WithPolicyFallback(fn func(ctx context.Context, err error) error) PolicyOption {
+	return func(p *Policy) { p.fallback = fn }
+}
+
 // WithPolicyObserver attaches an observer to the policy itself.
 func WithPolicyObserver(o Observer) PolicyOption {
 	return func(p *Policy) { p.observer = o }
 }
 
 // Do runs fn through all configured components.
+//
+// Execution order (outside → inside):
+//
+//	Fallback → Retry → Hedge → CircuitBreaker → Bulkhead → RateLimiter → fn()
 func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) error {
 	wrapped := fn
 
+	// bulkhead (innermost, right before the actual call)
+	if p.bulkhead != nil {
+		inner := wrapped
+		wrapped = func(ctx context.Context) error {
+			return p.bulkhead.Do(ctx, inner)
+		}
+	}
+
 	if p.cb != nil {
-		// when CB is present, buildCBWrapped handles RL internally
-		// so that rate limit rejections don't count as CB failures
 		wrapped = p.buildCBWrapped(fn)
 	} else if p.rl != nil {
-		// no CB — just wrap with rate limiter directly
 		inner := wrapped
 		wrapped = func(ctx context.Context) error {
 			if err := p.rl.Wait(ctx); err != nil {
@@ -77,13 +105,20 @@ func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) err
 		}
 	}
 
-	// wrap with retry (outermost)
+	// hedged requests
+	if p.hedge != nil {
+		inner := wrapped
+		wrapped = func(ctx context.Context) error {
+			return p.hedge.Do(ctx, inner)
+		}
+	}
+
+	// retry
 	if p.retry != nil {
 		inner := wrapped
 		wrapped = func(ctx context.Context) error {
 			return p.retry.Do(ctx, func(ctx context.Context) error {
 				err := inner(ctx)
-				// don't retry circuit breaker open errors — pointless
 				if err == ErrCircuitOpen {
 					return &permanentError{err}
 				}
@@ -92,7 +127,14 @@ func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) err
 		}
 	}
 
-	return unwrapPermanent(wrapped(ctx))
+	err := unwrapPermanent(wrapped(ctx))
+
+	// fallback — last resort
+	if err != nil && p.fallback != nil {
+		return p.fallback(ctx, err)
+	}
+
+	return err
 }
 
 // buildCBWrapped builds the correct CB + RL wrapping.
