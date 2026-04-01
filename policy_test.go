@@ -200,3 +200,74 @@ func TestPolicy_FullStack(t *testing.T) {
 		t.Fatalf("expected 2 calls, got %d", calls)
 	}
 }
+
+func TestPolicy_Fallback(t *testing.T) {
+	clk := newMockClock(time.Now())
+	r := NewRetry(WithMaxRetries(1), WithRetryClock(clk))
+
+	fallbackCalled := false
+	p := NewPolicy(
+		WithPolicyRetry(r),
+		WithPolicyFallback(func(ctx context.Context, err error) error {
+			fallbackCalled = true
+			return nil // recover
+		}),
+	)
+
+	err := p.Do(context.Background(), func(ctx context.Context) error {
+		return errBoom
+	})
+
+	if err != nil {
+		t.Fatalf("fallback should have recovered, got: %v", err)
+	}
+	if !fallbackCalled {
+		t.Fatal("fallback was not called")
+	}
+}
+
+func TestPolicy_FallbackNotCalledOnSuccess(t *testing.T) {
+	fallbackCalled := false
+	p := NewPolicy(
+		WithPolicyFallback(func(ctx context.Context, err error) error {
+			fallbackCalled = true
+			return nil
+		}),
+	)
+
+	err := p.Do(context.Background(), func(ctx context.Context) error {
+		return nil
+	})
+
+	if err != nil {
+		t.Fatal("unexpected error")
+	}
+	if fallbackCalled {
+		t.Fatal("fallback should not be called on success")
+	}
+}
+
+func TestPolicy_WithBulkhead(t *testing.T) {
+	b := NewBulkhead(2, WithMaxWaitDuration(0))
+	p := NewPolicy(WithPolicyBulkhead(b))
+
+	ctx := context.Background()
+	gate := make(chan struct{})
+
+	// fill both slots
+	for i := 0; i < 2; i++ {
+		go p.Do(ctx, func(ctx context.Context) error {
+			<-gate
+			return nil
+		})
+	}
+	time.Sleep(10 * time.Millisecond) // let them acquire
+
+	// third should fail
+	err := p.Do(ctx, func(ctx context.Context) error { return nil })
+	if !errors.Is(err, ErrBulkheadFull) {
+		t.Fatalf("expected ErrBulkheadFull, got %v", err)
+	}
+
+	close(gate)
+}
