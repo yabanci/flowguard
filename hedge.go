@@ -92,6 +92,15 @@ func (h *Hedge) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 				firstErr = r.err
 			}
 
+			// if a call failed and we still have hedge budget, launch one immediately
+			// instead of waiting for the delay timer
+			if hedgesLaunched < h.maxHedges {
+				hedgesLaunched++
+				h.observer.OnRetry(hedgesLaunched, r.err)
+				go run(hedgesLaunched)
+				continue
+			}
+
 			// all launched copies reported back and none succeeded
 			if received >= 1+hedgesLaunched {
 				h.observer.OnFailure(firstErr, time.Since(start))
