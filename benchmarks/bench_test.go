@@ -83,3 +83,33 @@ func BenchmarkSlidingWindowAllow(b *testing.B) {
 		rl.Allow()
 	}
 }
+
+func BenchmarkBulkheadDo(b *testing.B) {
+	bh := flowguard.NewBulkhead(1e6)
+	ctx := context.Background()
+	fn := func(ctx context.Context) error { return nil }
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		bh.Do(ctx, fn)
+	}
+}
+
+func BenchmarkLoadShedderDo(b *testing.B) {
+	ls := flowguard.NewLoadShedder(1e6, time.Hour) // won't trigger decrease
+	ctx := context.Background()
+	fn := func(ctx context.Context) error { return nil }
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ls.Do(ctx, fn)
+	}
+}
+
+func BenchmarkAdaptiveCBDo(b *testing.B) {
+	cb := flowguard.NewAdaptiveCircuitBreaker(1000, 0.9, 100)
+	ctx := context.Background()
+	fn := func(ctx context.Context) error { return nil }
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cb.Do(ctx, fn)
+	}
+}

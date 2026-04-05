@@ -18,8 +18,8 @@ type LoadShedder struct {
 	inflight atomic.Int64
 	limit    atomic.Int64
 
-	minLimit     int64
-	maxLimit     int64
+	minLimit         int64
+	maxLimit         int64
 	latencyThreshold time.Duration // if a call takes longer than this, treat as overload
 
 	observer Observer

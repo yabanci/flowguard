@@ -13,8 +13,8 @@ import (
 
 func main() {
 	ls := flowguard.NewLoadShedder(
-		20,                    // initial concurrency limit
-		50*time.Millisecond,   // latency threshold
+		20,                  // initial concurrency limit
+		50*time.Millisecond, // latency threshold
 		flowguard.WithLoadShedLimits(5, 100),
 	)
 

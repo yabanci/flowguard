@@ -16,9 +16,9 @@ import (
 // IMPORTANT: fn must be safe to call concurrently and should be idempotent.
 // All hedged calls share the same context, so cancelling one cancels all.
 type Hedge struct {
-	delay      time.Duration // how long to wait before launching hedge
-	maxHedges  int           // max extra requests (1 = at most 2 total)
-	observer   Observer
+	delay     time.Duration // how long to wait before launching hedge
+	maxHedges int           // max extra requests (1 = at most 2 total)
+	observer  Observer
 }
 
 // HedgeOption configures a Hedge.
