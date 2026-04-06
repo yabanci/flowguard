@@ -68,7 +68,7 @@ func TestLeak_HedgeAllFail(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	h := NewHedge(5 * time.Millisecond, WithMaxHedges(2))
+	h := NewHedge(5*time.Millisecond, WithMaxHedges(2))
 	for i := 0; i < 10; i++ {
 		h.Do(context.Background(), func(ctx context.Context) error {
 			return errBoom

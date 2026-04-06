@@ -92,9 +92,11 @@ func TestInvariant_Retry_MaxCallCount(t *testing.T) {
 }
 
 func TestInvariant_RateLimiter_NeverExceedsBurst(t *testing.T) {
-	// Allow() should never return true more than burst times without time passing
+	// Allow() should never return true more than burst times without time passing.
+	// Use mock clock so real time doesn't cause refills.
 	for _, burst := range []int{1, 5, 10, 50, 100} {
-		rl := NewRateLimiter(1000, burst)
+		clk := newMockClock(time.Now())
+		rl := NewRateLimiter(1000, burst, WithRateLimiterClock(clk))
 
 		allowed := 0
 		for i := 0; i < burst*3; i++ {
