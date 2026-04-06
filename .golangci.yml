@@ -11,6 +11,10 @@ issues:
     - path: _test\.go
       linters:
         - errcheck
+        - gosec
     - path: benchmarks/
       linters:
         - errcheck
+    - path: examples/
+      linters:
+        - gosec
