@@ -166,3 +166,67 @@ func TestSlidingWindow_Expiry(t *testing.T) {
 		t.Fatal("expected allow after window passed")
 	}
 }
+
+func TestAIMD_Basic(t *testing.T) {
+	rl := NewAIMDLimiter(5, 1, 20)
+
+	// should allow 5 requests
+	for i := 0; i < 5; i++ {
+		if !rl.Allow() {
+			t.Fatalf("expected allow on call %d", i+1)
+		}
+	}
+	if rl.Allow() {
+		t.Fatal("should reject at limit")
+	}
+}
+
+func TestAIMD_Increase(t *testing.T) {
+	rl := NewAIMDLimiter(3, 1, 10)
+
+	rl.OnSuccess() // limit → 4
+	rl.OnSuccess() // limit → 5
+	if got := rl.CurrentLimit(); got != 5 {
+		t.Fatalf("expected limit 5, got %d", got)
+	}
+
+	// should be able to use all 5
+	for i := 0; i < 5; i++ {
+		if !rl.Allow() {
+			t.Fatalf("expected allow on call %d", i+1)
+		}
+	}
+	if rl.Allow() {
+		t.Fatal("should reject")
+	}
+}
+
+func TestAIMD_Decrease(t *testing.T) {
+	rl := NewAIMDLimiter(10, 2, 20)
+
+	rl.OnFailure() // limit → 5
+	if got := rl.CurrentLimit(); got != 5 {
+		t.Fatalf("expected 5, got %d", got)
+	}
+
+	rl.OnFailure() // limit → 2 (min)
+	if got := rl.CurrentLimit(); got != 2 {
+		t.Fatalf("expected 2 (min), got %d", got)
+	}
+
+	rl.OnFailure() // should stay at min
+	if got := rl.CurrentLimit(); got != 2 {
+		t.Fatalf("expected 2 (min floor), got %d", got)
+	}
+}
+
+func TestAIMD_MaxCap(t *testing.T) {
+	rl := NewAIMDLimiter(9, 1, 10)
+
+	rl.OnSuccess() // → 10
+	rl.OnSuccess() // should stay at 10 (max)
+
+	if got := rl.CurrentLimit(); got != 10 {
+		t.Fatalf("expected 10 (max), got %d", got)
+	}
+}
