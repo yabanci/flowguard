@@ -21,18 +21,22 @@ type Counts struct {
 type CircuitBreaker struct {
 	mu sync.Mutex
 
-	state    State
-	counts   Counts
-	expiry   time.Time // when Open state expires → transitions to HalfOpen
-	halfOpen int       // current number of in-flight half-open probes
+	state  State
+	counts Counts
+	expiry time.Time // when Open state expires → transitions to HalfOpen
 
-	failureThreshold  int
-	successThreshold  int
-	openTimeout       time.Duration
-	halfOpenMaxCalls  int
-	tripFn            func(Counts) bool
-	clock             Clock
-	observer          Observer
+	// NOTE: we use a buffered channel as a semaphore for half-open probes.
+	// Previously this was a plain int counter, but that had a subtle race
+	// where two goroutines could both pass the check before either incremented.
+	halfOpenSem chan struct{}
+
+	failureThreshold int
+	successThreshold int
+	openTimeout      time.Duration
+	halfOpenMaxCalls int
+	tripFn           func(Counts) bool
+	clock            Clock
+	observer         Observer
 }
 
 // CircuitBreakerOption configures a CircuitBreaker.
@@ -53,6 +57,7 @@ func NewCircuitBreaker(opts ...CircuitBreakerOption) *CircuitBreaker {
 	for _, opt := range opts {
 		opt(cb)
 	}
+	cb.halfOpenSem = make(chan struct{}, cb.halfOpenMaxCalls)
 	return cb
 }
 
@@ -129,12 +134,14 @@ func (cb *CircuitBreaker) beforeCall() error {
 	case StateOpen:
 		return ErrCircuitOpen
 	case StateHalfOpen:
-		if cb.halfOpen >= cb.halfOpenMaxCalls {
+		// try to acquire a half-open probe slot (non-blocking)
+		select {
+		case cb.halfOpenSem <- struct{}{}:
+			cb.counts.Requests++
+			return nil
+		default:
 			return ErrTooManyRequests
 		}
-		cb.halfOpen++
-		cb.counts.Requests++
-		return nil
 	}
 	return nil
 }
@@ -158,7 +165,8 @@ func (cb *CircuitBreaker) onSuccess(lat time.Duration) {
 	cb.observer.OnSuccess(lat)
 
 	if cb.state == StateHalfOpen {
-		cb.halfOpen--
+		// release the probe slot
+		<-cb.halfOpenSem
 		if cb.counts.ConsecutiveSuccesses >= cb.successThreshold {
 			cb.setState(StateClosed)
 		}
@@ -178,8 +186,8 @@ func (cb *CircuitBreaker) onFailure(err error, lat time.Duration) {
 			cb.setState(StateOpen)
 		}
 	case StateHalfOpen:
-		cb.halfOpen--
-		// any failure in half-open → back to open
+		// release probe slot, then go back to open
+		<-cb.halfOpenSem
 		cb.setState(StateOpen)
 	}
 }
@@ -201,10 +209,19 @@ func (cb *CircuitBreaker) setState(s State) {
 
 	// reset counters on state change
 	cb.counts = Counts{}
-	cb.halfOpen = 0
 
 	if s == StateOpen {
 		cb.expiry = cb.clock.Now().Add(cb.openTimeout)
+	}
+	if s == StateHalfOpen {
+		// drain the semaphore so it's fresh
+		for {
+			select {
+			case <-cb.halfOpenSem:
+			default:
+				return
+			}
+		}
 	}
 }
 
