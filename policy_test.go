@@ -97,6 +97,41 @@ func TestPolicy_RateLimitDoesNotTripCB(t *testing.T) {
 	}
 }
 
+func TestPolicy_RateLimitBurstExhausted_CBStaysClosed(t *testing.T) {
+	// This is the key edge case: when rate limiter rejects because burst is
+	// exhausted, the circuit breaker should NOT count that as a failure.
+	clk := newMockClock(time.Now())
+	obs := &testObserver{}
+	rl := NewRateLimiter(10, 2, WithRateLimiterClock(clk))
+	cb := NewCircuitBreaker(
+		WithFailureThreshold(1), // very sensitive — trips on 1 failure
+		WithCircuitBreakerClock(clk),
+		WithCircuitBreakerObserver(obs),
+	)
+
+	p := NewPolicy(
+		WithPolicyRateLimiter(rl),
+		WithPolicyCircuitBreaker(cb),
+	)
+	ctx := context.Background()
+
+	// burn through burst
+	p.Do(ctx, func(ctx context.Context) error { return nil })
+	p.Do(ctx, func(ctx context.Context) error { return nil })
+
+	// refill a token and make another successful call
+	clk.Advance(200 * time.Millisecond) // ~2 tokens at 10/s
+	p.Do(ctx, func(ctx context.Context) error { return nil })
+
+	// CB must still be closed — rate limiting is not a failure
+	if cb.State() != StateClosed {
+		t.Fatalf("CB should be closed, got %v", cb.State())
+	}
+	if obs.failures > 0 {
+		t.Fatalf("expected 0 CB failures, got %d", obs.failures)
+	}
+}
+
 func TestPolicy_CBOpenStopsRetry(t *testing.T) {
 	clk := newMockClock(time.Now())
 	cb := NewCircuitBreaker(
