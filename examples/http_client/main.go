@@ -50,7 +50,7 @@ func main() {
 				return fmt.Errorf("server error: %d", resp.StatusCode)
 			}
 			b, _ := io.ReadAll(resp.Body)
-			body = string(b[:min(len(b), 80)]) // just first 80 chars
+			body = string(b[:minInt(len(b), 80)]) // just first 80 chars
 			return nil
 		})
 
@@ -62,7 +62,8 @@ func main() {
 	}
 }
 
-func min(a, b int) int {
+// TODO: remove when we bump to go 1.21+ (min is builtin there)
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
