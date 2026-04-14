@@ -73,7 +73,7 @@ func TestHTTPMiddleware_CircuitOpen(t *testing.T) {
 	wrapped := HTTPMiddleware(p)(handler)
 
 	// trip the CB directly
-	cb.Do(nil, func(_ context.Context) error { return errBoom })
+	cb.Do(context.Background(), func(_ context.Context) error { return errBoom })
 
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
