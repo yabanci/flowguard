@@ -16,17 +16,17 @@ type Observer interface {
 // noopObserver is the default — does nothing.
 type noopObserver struct{}
 
-func (noopObserver) OnSuccess(time.Duration)            {}
-func (noopObserver) OnFailure(error, time.Duration)     {}
-func (noopObserver) OnRetry(int, error)                 {}
-func (noopObserver) OnStateChange(State, State)         {}
-func (noopObserver) OnRateLimited()                     {}
+func (noopObserver) OnSuccess(time.Duration)        {}
+func (noopObserver) OnFailure(error, time.Duration) {}
+func (noopObserver) OnRetry(int, error)             {}
+func (noopObserver) OnStateChange(State, State)     {}
+func (noopObserver) OnRateLimited()                 {}
 
 // State represents circuit breaker state.
 type State int
 
 const (
-	StateClosed   State = iota
+	StateClosed State = iota
 	StateOpen
 	StateHalfOpen
 )

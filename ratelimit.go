@@ -18,14 +18,14 @@ type RateLimiter struct {
 	lastTime time.Time
 
 	// sliding window fields
-	windowSize   time.Duration
-	windowLimit  int
-	buckets      []int
-	bucketCount  int
-	bucketIdx    int
-	bucketStart  time.Time
-	bucketWidth  time.Duration
-	isWindow     bool
+	windowSize  time.Duration
+	windowLimit int
+	buckets     []int
+	bucketCount int
+	bucketIdx   int
+	bucketStart time.Time
+	bucketWidth time.Duration
+	isWindow    bool
 
 	// AIMD fields
 	aimdCurrent int
