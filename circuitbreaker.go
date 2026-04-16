@@ -18,6 +18,10 @@ type Counts struct {
 
 // CircuitBreaker implements the circuit breaker pattern.
 // Three states: Closed (normal) → Open (failing) → HalfOpen (probing).
+//
+// Two modes:
+//   - Classic: trips after N consecutive failures (default)
+//   - Adaptive: trips when error rate exceeds a threshold over a sliding window
 type CircuitBreaker struct {
 	mu sync.Mutex
 
@@ -37,6 +41,15 @@ type CircuitBreaker struct {
 	tripFn           func(Counts) bool
 	clock            Clock
 	observer         Observer
+
+	// --- adaptive / sliding window fields ---
+	adaptive         bool
+	windowSize       int     // how many recent results to track
+	errorThreshold   float64 // 0.0-1.0, trip when error rate exceeds this
+	windowResults    []bool  // ring buffer: true=success, false=failure
+	windowIdx        int
+	windowFilled     bool // have we filled the ring at least once?
+	minWindowSamples int  // don't trip until we have at least this many samples
 }
 
 // CircuitBreakerOption configures a CircuitBreaker.
@@ -89,6 +102,36 @@ func WithCircuitBreakerClock(c Clock) CircuitBreakerOption {
 
 func WithCircuitBreakerObserver(o Observer) CircuitBreakerOption {
 	return func(cb *CircuitBreaker) { cb.observer = o }
+}
+
+// NewAdaptiveCircuitBreaker creates a circuit breaker that trips based on
+// error rate over a sliding window, not just consecutive failures.
+//
+// Example: windowSize=100, errorThreshold=0.5 means "trip if >50% of the
+// last 100 calls failed". This is way more robust than counting consecutive
+// failures — a single success doesn't reset everything.
+//
+// minSamples is how many calls must happen before the error rate is checked.
+// Set it to something reasonable (10-20) to avoid tripping on the first error.
+func NewAdaptiveCircuitBreaker(windowSize int, errorThreshold float64, minSamples int, opts ...CircuitBreakerOption) *CircuitBreaker {
+	cb := &CircuitBreaker{
+		state:            StateClosed,
+		successThreshold: 2,
+		openTimeout:      30 * time.Second,
+		halfOpenMaxCalls: 1,
+		clock:            defaultClock{},
+		observer:         noopObserver{},
+		adaptive:         true,
+		windowSize:       windowSize,
+		errorThreshold:   errorThreshold,
+		windowResults:    make([]bool, windowSize),
+		minWindowSamples: minSamples,
+	}
+	for _, opt := range opts {
+		opt(cb)
+	}
+	cb.halfOpenSem = make(chan struct{}, cb.halfOpenMaxCalls)
+	return cb
 }
 
 // Do runs fn through the circuit breaker.
@@ -162,10 +205,13 @@ func (cb *CircuitBreaker) onSuccess(lat time.Duration) {
 	cb.counts.ConsecutiveSuccesses++
 	cb.counts.ConsecutiveFailures = 0
 
+	if cb.adaptive {
+		cb.recordResult(true)
+	}
+
 	cb.observer.OnSuccess(lat)
 
 	if cb.state == StateHalfOpen {
-		// release the probe slot
 		<-cb.halfOpenSem
 		if cb.counts.ConsecutiveSuccesses >= cb.successThreshold {
 			cb.setState(StateClosed)
@@ -178,6 +224,10 @@ func (cb *CircuitBreaker) onFailure(err error, lat time.Duration) {
 	cb.counts.ConsecutiveFailures++
 	cb.counts.ConsecutiveSuccesses = 0
 
+	if cb.adaptive {
+		cb.recordResult(false)
+	}
+
 	cb.observer.OnFailure(err, lat)
 
 	switch cb.state {
@@ -186,7 +236,6 @@ func (cb *CircuitBreaker) onFailure(err error, lat time.Duration) {
 			cb.setState(StateOpen)
 		}
 	case StateHalfOpen:
-		// release probe slot, then go back to open
 		<-cb.halfOpenSem
 		cb.setState(StateOpen)
 	}
@@ -196,7 +245,64 @@ func (cb *CircuitBreaker) shouldTrip() bool {
 	if cb.tripFn != nil {
 		return cb.tripFn(cb.counts)
 	}
+	if cb.adaptive {
+		return cb.adaptiveShouldTrip()
+	}
 	return cb.counts.ConsecutiveFailures >= cb.failureThreshold
+}
+
+// --- adaptive sliding window logic ---
+
+func (cb *CircuitBreaker) recordResult(success bool) {
+	cb.windowResults[cb.windowIdx] = success
+	cb.windowIdx = (cb.windowIdx + 1) % cb.windowSize
+	if cb.windowIdx == 0 {
+		cb.windowFilled = true
+	}
+}
+
+func (cb *CircuitBreaker) adaptiveShouldTrip() bool {
+	n := cb.windowSize
+	if !cb.windowFilled {
+		n = cb.windowIdx
+	}
+	if n < cb.minWindowSamples {
+		return false // not enough data yet
+	}
+
+	failures := 0
+	for i := 0; i < n; i++ {
+		if !cb.windowResults[i] {
+			failures++
+		}
+	}
+	rate := float64(failures) / float64(n)
+	return rate > cb.errorThreshold
+}
+
+// ErrorRate returns the current error rate from the sliding window.
+// Returns 0 if not enough samples yet. Only meaningful for adaptive CB.
+func (cb *CircuitBreaker) ErrorRate() float64 {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if !cb.adaptive {
+		return 0
+	}
+	n := cb.windowSize
+	if !cb.windowFilled {
+		n = cb.windowIdx
+	}
+	if n == 0 {
+		return 0
+	}
+	failures := 0
+	for i := 0; i < n; i++ {
+		if !cb.windowResults[i] {
+			failures++
+		}
+	}
+	return float64(failures) / float64(n)
 }
 
 func (cb *CircuitBreaker) setState(s State) {
@@ -209,6 +315,13 @@ func (cb *CircuitBreaker) setState(s State) {
 
 	// reset counters on state change
 	cb.counts = Counts{}
+	if cb.adaptive {
+		cb.windowIdx = 0
+		cb.windowFilled = false
+		for i := range cb.windowResults {
+			cb.windowResults[i] = false
+		}
+	}
 
 	if s == StateOpen {
 		cb.expiry = cb.clock.Now().Add(cb.openTimeout)
