@@ -204,3 +204,121 @@ func TestCB_SuccessesResetCounter(t *testing.T) {
 		t.Fatal("should still be closed — success reset the counter")
 	}
 }
+
+// --- adaptive circuit breaker tests ---
+
+func TestAdaptiveCB_TripsOnErrorRate(t *testing.T) {
+	clk := newMockClock(time.Now())
+	// trip when >50% of last 10 calls fail, need at least 5 samples
+	cb := NewAdaptiveCircuitBreaker(10, 0.5, 5,
+		WithCircuitBreakerClock(clk),
+	)
+
+	ctx := context.Background()
+	fail := func(ctx context.Context) error { return errBoom }
+	ok := func(ctx context.Context) error { return nil }
+
+	// 4 failures — not enough samples yet (need 5)
+	for i := 0; i < 4; i++ {
+		cb.Do(ctx, fail)
+	}
+	if cb.State() != StateClosed {
+		t.Fatal("shouldn't trip yet — not enough samples")
+	}
+
+	// 5th failure — now 5/5 = 100% error rate, should trip
+	cb.Do(ctx, fail)
+	if cb.State() != StateOpen {
+		t.Fatalf("should have tripped, error rate is 100%%, state=%v", cb.State())
+	}
+
+	// wait for half-open
+	clk.Advance(31 * time.Second)
+
+	// succeed twice to close
+	cb.Do(ctx, ok)
+	cb.Do(ctx, ok)
+	if cb.State() != StateClosed {
+		t.Fatal("should be closed after successes in half-open")
+	}
+}
+
+func TestAdaptiveCB_DoesNotTripBelowThreshold(t *testing.T) {
+	clk := newMockClock(time.Now())
+	cb := NewAdaptiveCircuitBreaker(20, 0.5, 10,
+		WithCircuitBreakerClock(clk),
+	)
+
+	ctx := context.Background()
+	fail := func(ctx context.Context) error { return errBoom }
+	ok := func(ctx context.Context) error { return nil }
+
+	// 7 successes, 3 failures = 30% error rate
+	for i := 0; i < 7; i++ {
+		cb.Do(ctx, ok)
+	}
+	for i := 0; i < 3; i++ {
+		cb.Do(ctx, fail)
+	}
+
+	// 30% < 50% threshold — should stay closed
+	if cb.State() != StateClosed {
+		t.Fatal("should stay closed at 30% error rate")
+	}
+}
+
+func TestAdaptiveCB_SlidingWindowEvicts(t *testing.T) {
+	clk := newMockClock(time.Now())
+	// window of 5, trip at >50%, min 3 samples
+	cb := NewAdaptiveCircuitBreaker(5, 0.5, 3,
+		WithCircuitBreakerClock(clk),
+	)
+
+	ctx := context.Background()
+	fail := func(ctx context.Context) error { return errBoom }
+	ok := func(ctx context.Context) error { return nil }
+
+	// fill window with failures: [F, F, F, F, F] = 100%
+	for i := 0; i < 5; i++ {
+		cb.Do(ctx, fail)
+	}
+	// this trips it
+	if cb.State() != StateOpen {
+		t.Fatal("should have tripped")
+	}
+
+	// recover
+	clk.Advance(31 * time.Second)
+	cb.Do(ctx, ok)
+	cb.Do(ctx, ok)
+	// now closed again, window is reset
+
+	// add 3 successes: [S, S, S] — 0% error
+	cb.Do(ctx, ok)
+	cb.Do(ctx, ok)
+	cb.Do(ctx, ok)
+
+	// add 1 failure: [S, S, S, F] = 25% — still under 50%
+	cb.Do(ctx, fail)
+	if cb.State() != StateClosed {
+		t.Fatal("should stay closed at 25%")
+	}
+}
+
+func TestAdaptiveCB_ErrorRate(t *testing.T) {
+	cb := NewAdaptiveCircuitBreaker(10, 0.8, 5)
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		cb.Do(ctx, func(ctx context.Context) error { return nil })
+	}
+	for i := 0; i < 2; i++ {
+		cb.Do(ctx, func(ctx context.Context) error { return errBoom })
+	}
+
+	rate := cb.ErrorRate()
+	// 2 failures out of 5 = 0.4
+	if rate < 0.39 || rate > 0.41 {
+		t.Fatalf("expected ~0.4 error rate, got %f", rate)
+	}
+}
