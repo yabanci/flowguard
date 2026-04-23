@@ -1,1 +1,19 @@
-PROMOTION.md
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+*.exe
+/bin/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Coverage
+*.out
+coverage.out
+cov.out

@@ -1,4 +1,4 @@
-package flowguard
+package loadshed
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 )
 
 func TestLoadShedder_Basic(t *testing.T) {
-	ls := NewLoadShedder(10, 100*time.Millisecond)
+	ls := New(10, 100*time.Millisecond)
 
 	err := ls.Do(context.Background(), func(ctx context.Context) error {
 		return nil
@@ -21,7 +21,7 @@ func TestLoadShedder_Basic(t *testing.T) {
 }
 
 func TestLoadShedder_ShedsAtLimit(t *testing.T) {
-	ls := NewLoadShedder(3, time.Second)
+	ls := New(3, time.Second)
 	ctx := context.Background()
 
 	gate := make(chan struct{})
@@ -48,8 +48,8 @@ func TestLoadShedder_ShedsAtLimit(t *testing.T) {
 
 	// 4th request should be shed
 	err := ls.Do(ctx, func(ctx context.Context) error { return nil })
-	if !errors.Is(err, ErrLoadShed) {
-		t.Fatalf("expected ErrLoadShed, got %v", err)
+	if !errors.Is(err, ErrShed) {
+		t.Fatalf("expected ErrShed, got %v", err)
 	}
 
 	close(gate)
@@ -57,8 +57,8 @@ func TestLoadShedder_ShedsAtLimit(t *testing.T) {
 }
 
 func TestLoadShedder_DecreasesOnSlowCalls(t *testing.T) {
-	ls := NewLoadShedder(20, 10*time.Millisecond,
-		WithLoadShedLimits(2, 100),
+	ls := New(20, 10*time.Millisecond,
+		WithLimits(2, 100),
 	)
 
 	ctx := context.Background()
@@ -76,7 +76,7 @@ func TestLoadShedder_DecreasesOnSlowCalls(t *testing.T) {
 }
 
 func TestLoadShedder_IncreasesOnSuccess(t *testing.T) {
-	ls := NewLoadShedder(10, time.Second)
+	ls := New(10, time.Second)
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
@@ -90,8 +90,8 @@ func TestLoadShedder_IncreasesOnSuccess(t *testing.T) {
 }
 
 func TestLoadShedder_DecreasesOnError(t *testing.T) {
-	ls := NewLoadShedder(20, time.Second,
-		WithLoadShedLimits(5, 100),
+	ls := New(20, time.Second,
+		WithLimits(5, 100),
 	)
 	ctx := context.Background()
 
@@ -103,8 +103,8 @@ func TestLoadShedder_DecreasesOnError(t *testing.T) {
 }
 
 func TestLoadShedder_RespectsMinMax(t *testing.T) {
-	ls := NewLoadShedder(6, time.Second,
-		WithLoadShedLimits(5, 8),
+	ls := New(6, time.Second,
+		WithLimits(5, 8),
 	)
 	ctx := context.Background()
 
@@ -115,8 +115,8 @@ func TestLoadShedder_RespectsMinMax(t *testing.T) {
 	}
 
 	// increase past max
-	ls2 := NewLoadShedder(7, time.Second,
-		WithLoadShedLimits(1, 8),
+	ls2 := New(7, time.Second,
+		WithLimits(1, 8),
 	)
 	for i := 0; i < 5; i++ {
 		ls2.Do(ctx, func(ctx context.Context) error { return nil })
@@ -127,7 +127,7 @@ func TestLoadShedder_RespectsMinMax(t *testing.T) {
 }
 
 func TestLoadShedder_Inflight(t *testing.T) {
-	ls := NewLoadShedder(10, time.Second)
+	ls := New(10, time.Second)
 	ctx := context.Background()
 
 	if ls.Inflight() != 0 {

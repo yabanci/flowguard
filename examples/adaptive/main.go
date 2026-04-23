@@ -9,11 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/ratelimit"
 )
 
 func main() {
-	rl := flowguard.NewAIMDLimiter(
+	rl := ratelimit.NewAIMD(
 		10, // initial limit
 		2,  // min
 		50, // max

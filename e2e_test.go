@@ -1,4 +1,4 @@
-package flowguard
+package flowguard_test
 
 import (
 	"context"
@@ -10,6 +10,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/bulkhead"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/hedge"
+	"github.com/yabanci/flowguard/loadshed"
+	"github.com/yabanci/flowguard/observer"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
 // These tests use real HTTP servers, real network I/O, real time.
@@ -30,12 +39,12 @@ func TestE2E_UnstableServer_PolicyRecovers(t *testing.T) {
 	}))
 	defer server.Close()
 
-	policy := NewPolicy(
-		WithPolicyCircuitBreaker(NewCircuitBreaker(WithFailureThreshold(10))),
-		WithPolicyRetry(NewRetry(
-			WithMaxRetries(5),
-			WithConstantBackoff(10*time.Millisecond),
-			WithJitter(0),
+	policy := flowguard.NewPolicy(
+		flowguard.WithCircuitBreaker(circuitbreaker.New(circuitbreaker.WithFailureThreshold(10))),
+		flowguard.WithRetry(retry.New(
+			retry.WithMaxRetries(5),
+			retry.WithConstantBackoff(10*time.Millisecond),
+			retry.WithJitter(0),
 		)),
 	)
 
@@ -75,8 +84,8 @@ func TestE2E_RateLimiter_ActuallyLimitsRPS(t *testing.T) {
 	}))
 	defer server.Close()
 
-	rl := NewRateLimiter(20, 5) // 20/s, burst 5
-	policy := NewPolicy(WithPolicyRateLimiter(rl))
+	rl := ratelimit.NewTokenBucket(20, 5) // 20/s, burst 5
+	policy := flowguard.NewPolicy(flowguard.WithRateLimiter(rl))
 
 	start := time.Now()
 	for i := 0; i < 15; i++ {
@@ -111,9 +120,9 @@ func TestE2E_CircuitBreaker_ProtectsFromDeadServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cb := NewCircuitBreaker(
-		WithFailureThreshold(3),
-		WithOpenTimeout(time.Second),
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(3),
+		circuitbreaker.WithOpenTimeout(time.Second),
 	)
 
 	ctx := context.Background()
@@ -130,7 +139,7 @@ func TestE2E_CircuitBreaker_ProtectsFromDeadServer(t *testing.T) {
 		})
 	}
 
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatal("CB should be open after 3 failures")
 	}
 
@@ -142,8 +151,8 @@ func TestE2E_CircuitBreaker_ProtectsFromDeadServer(t *testing.T) {
 	})
 	rejectionTime := time.Since(start)
 
-	if err != ErrCircuitOpen {
-		t.Fatalf("expected ErrCircuitOpen, got: %v", err)
+	if err != circuitbreaker.ErrOpen {
+		t.Fatalf("expected circuitbreaker.ErrOpen, got: %v", err)
 	}
 	if rejectionTime > 5*time.Millisecond {
 		t.Fatalf("rejection took %v — should be instant", rejectionTime)
@@ -168,7 +177,7 @@ func TestE2E_Bulkhead_LimitsConcurrentRequests(t *testing.T) {
 	}))
 	defer server.Close()
 
-	bh := NewBulkhead(3, WithMaxWaitDuration(2*time.Second))
+	bh := bulkhead.New(3, bulkhead.WithMaxWait(2*time.Second))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
@@ -208,7 +217,7 @@ func TestE2E_Hedge_ReducesTailLatency(t *testing.T) {
 	}))
 	defer server.Close()
 
-	h := NewHedge(30 * time.Millisecond) // hedge after 30ms
+	h := hedge.New(30 * time.Millisecond) // hedge after 30ms
 
 	var latencies []time.Duration
 	for i := 0; i < 10; i++ {
@@ -249,7 +258,7 @@ func TestE2E_LoadShedder_ProtectsUnderBurst(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ls := NewLoadShedder(5, 50*time.Millisecond, WithLoadShedLimits(2, 20))
+	ls := loadshed.New(5, 50*time.Millisecond, loadshed.WithLimits(2, 20))
 
 	var ok, shed atomic.Int32
 	var wg sync.WaitGroup
@@ -267,7 +276,7 @@ func TestE2E_LoadShedder_ProtectsUnderBurst(t *testing.T) {
 				resp.Body.Close()
 				return nil
 			})
-			if err == ErrLoadShed {
+			if err == loadshed.ErrShed {
 				shed.Add(1)
 			} else if err == nil {
 				ok.Add(1)
@@ -298,13 +307,13 @@ func TestE2E_Fallback_ServesStaleData(t *testing.T) {
 	}))
 	defer server.Close()
 
-	policy := NewPolicy(
-		WithPolicyCircuitBreaker(NewCircuitBreaker(WithFailureThreshold(2))),
-		WithPolicyRetry(NewRetry(
-			WithMaxRetries(1),
-			WithConstantBackoff(time.Millisecond),
+	policy := flowguard.NewPolicy(
+		flowguard.WithCircuitBreaker(circuitbreaker.New(circuitbreaker.WithFailureThreshold(2))),
+		flowguard.WithRetry(retry.New(
+			retry.WithMaxRetries(1),
+			retry.WithConstantBackoff(time.Millisecond),
 		)),
-		WithPolicyFallback(func(ctx context.Context, err error) error {
+		flowguard.WithFallback(func(ctx context.Context, err error) error {
 			// serve cached/stale data instead of failing
 			return nil
 		}),
@@ -350,16 +359,16 @@ func TestE2E_FullStack_RealWorldScenario(t *testing.T) {
 	}))
 	defer server.Close()
 
-	policy := NewPolicy(
-		WithPolicyRateLimiter(NewRateLimiter(50, 10)),
-		WithPolicyCircuitBreaker(NewAdaptiveCircuitBreaker(50, 0.6, 10)),
-		WithPolicyRetry(NewRetry(
-			WithMaxRetries(2),
-			WithExponentialBackoff(5*time.Millisecond),
-			WithMaxBackoff(50*time.Millisecond),
+	policy := flowguard.NewPolicy(
+		flowguard.WithRateLimiter(ratelimit.NewTokenBucket(50, 10)),
+		flowguard.WithCircuitBreaker(circuitbreaker.NewAdaptive(50, 0.6, 10)),
+		flowguard.WithRetry(retry.New(
+			retry.WithMaxRetries(2),
+			retry.WithExponentialBackoff(5*time.Millisecond),
+			retry.WithMaxBackoff(50*time.Millisecond),
 		)),
-		WithPolicyBulkhead(NewBulkhead(5, WithMaxWaitDuration(500*time.Millisecond))),
-		WithPolicyFallback(func(ctx context.Context, err error) error {
+		flowguard.WithBulkhead(bulkhead.New(5, bulkhead.WithMaxWait(500*time.Millisecond))),
+		flowguard.WithFallback(func(ctx context.Context, err error) error {
 			return nil // cached fallback
 		}),
 	)

@@ -8,12 +8,12 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/hedge"
 )
 
 func main() {
 	// hedge after 50ms — roughly our P95 latency
-	h := flowguard.NewHedge(50 * time.Millisecond)
+	h := hedge.New(50 * time.Millisecond)
 
 	for i := 0; i < 10; i++ {
 		start := time.Now()

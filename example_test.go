@@ -6,10 +6,36 @@ import (
 	"time"
 
 	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/bulkhead"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
-func ExampleNewRateLimiter() {
-	rl := flowguard.NewRateLimiter(10, 3) // 10/s, burst 3
+func ExampleNewPolicy() {
+	policy := flowguard.NewPolicy(
+		flowguard.WithRateLimiter(ratelimit.NewTokenBucket(100, 10)),
+		flowguard.WithCircuitBreaker(circuitbreaker.New()),
+		flowguard.WithRetry(retry.New(
+			retry.WithMaxRetries(2),
+			retry.WithConstantBackoff(time.Millisecond),
+		)),
+		flowguard.WithFallback(func(ctx context.Context, err error) error {
+			fmt.Println("fallback called")
+			return nil
+		}),
+	)
+
+	err := policy.Do(context.Background(), func(ctx context.Context) error {
+		return nil
+	})
+	fmt.Println("err:", err)
+	// Output:
+	// err: <nil>
+}
+
+func Example_tokenBucket() {
+	rl := ratelimit.NewTokenBucket(10, 3)
 
 	for i := 0; i < 5; i++ {
 		if rl.Allow() {
@@ -26,34 +52,32 @@ func ExampleNewRateLimiter() {
 	// request 4: rejected
 }
 
-func ExampleNewCircuitBreaker() {
-	cb := flowguard.NewCircuitBreaker(
-		flowguard.WithFailureThreshold(2),
-		flowguard.WithOpenTimeout(time.Second),
+func Example_circuitBreaker() {
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(2),
+		circuitbreaker.WithOpenTimeout(time.Second),
 	)
 
 	ctx := context.Background()
 
-	// two failures trip the breaker
-	cb.Do(ctx, func(ctx context.Context) error { return fmt.Errorf("fail") })
-	cb.Do(ctx, func(ctx context.Context) error { return fmt.Errorf("fail") })
+	_ = cb.Do(ctx, func(ctx context.Context) error { return fmt.Errorf("fail") })
+	_ = cb.Do(ctx, func(ctx context.Context) error { return fmt.Errorf("fail") })
 
 	fmt.Println("state:", cb.State())
 
-	// calls are now rejected
 	err := cb.Do(ctx, func(ctx context.Context) error { return nil })
 	fmt.Println("error:", err)
 
 	// Output:
 	// state: open
-	// error: flowguard: circuit breaker is open
+	// error: flowguard/circuitbreaker: open
 }
 
-func ExampleNewRetry() {
-	r := flowguard.NewRetry(
-		flowguard.WithMaxRetries(3),
-		flowguard.WithConstantBackoff(time.Millisecond),
-		flowguard.WithJitter(0),
+func Example_retry() {
+	r := retry.New(
+		retry.WithMaxRetries(3),
+		retry.WithConstantBackoff(time.Millisecond),
+		retry.WithJitter(0),
 	)
 
 	attempt := 0
@@ -70,30 +94,8 @@ func ExampleNewRetry() {
 	// succeeded after 3 attempts, err: <nil>
 }
 
-func ExampleNewPolicy() {
-	policy := flowguard.NewPolicy(
-		flowguard.WithPolicyRateLimiter(flowguard.NewRateLimiter(100, 10)),
-		flowguard.WithPolicyCircuitBreaker(flowguard.NewCircuitBreaker()),
-		flowguard.WithPolicyRetry(flowguard.NewRetry(
-			flowguard.WithMaxRetries(2),
-			flowguard.WithConstantBackoff(time.Millisecond),
-		)),
-		flowguard.WithPolicyFallback(func(ctx context.Context, err error) error {
-			fmt.Println("fallback called")
-			return nil
-		}),
-	)
-
-	err := policy.Do(context.Background(), func(ctx context.Context) error {
-		return nil
-	})
-	fmt.Println("err:", err)
-	// Output:
-	// err: <nil>
-}
-
-func ExampleNewBulkhead() {
-	b := flowguard.NewBulkhead(2, flowguard.WithMaxWaitDuration(0))
+func Example_bulkhead() {
+	b := bulkhead.New(2, bulkhead.WithMaxWait(0))
 
 	for i := 0; i < 3; i++ {
 		err := b.Do(context.Background(), func(ctx context.Context) error {
@@ -111,8 +113,8 @@ func ExampleNewBulkhead() {
 	// allowed
 }
 
-func ExampleNewAIMDLimiter() {
-	rl := flowguard.NewAIMDLimiter(5, 1, 20)
+func Example_aimd() {
+	rl := ratelimit.NewAIMD(5, 1, 20)
 
 	fmt.Println("initial:", rl.CurrentLimit())
 
@@ -129,21 +131,16 @@ func ExampleNewAIMDLimiter() {
 	// after failure: 3
 }
 
-func ExampleNewAdaptiveCircuitBreaker() {
-	cb := flowguard.NewAdaptiveCircuitBreaker(
-		10,  // window size
-		0.5, // error threshold (50%)
-		5,   // min samples before checking
-	)
+func Example_adaptiveCircuitBreaker() {
+	cb := circuitbreaker.NewAdaptive(10, 0.5, 5)
 
 	ctx := context.Background()
 
-	// 3 successes + 2 failures = 40% error rate (below 50%)
 	for i := 0; i < 3; i++ {
-		cb.Do(ctx, func(ctx context.Context) error { return nil })
+		_ = cb.Do(ctx, func(ctx context.Context) error { return nil })
 	}
 	for i := 0; i < 2; i++ {
-		cb.Do(ctx, func(ctx context.Context) error { return fmt.Errorf("fail") })
+		_ = cb.Do(ctx, func(ctx context.Context) error { return fmt.Errorf("fail") })
 	}
 
 	fmt.Printf("error rate: %.0f%%\n", cb.ErrorRate()*100)

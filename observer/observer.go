@@ -1,4 +1,8 @@
-package flowguard
+// Package observer defines the Observer interface every flowguard
+// primitive uses to emit events, plus the State enum for circuit
+// breaker transitions. Implement Observer to hook in Prometheus,
+// OpenTelemetry, or any other metrics system.
+package observer
 
 import "time"
 
@@ -13,14 +17,15 @@ type Observer interface {
 	OnRateLimited()
 }
 
-// noopObserver is the default — does nothing.
-type noopObserver struct{}
+// Noop is the default observer that does nothing.
+// Exposed so users can embed it and only override the methods they need.
+type Noop struct{}
 
-func (noopObserver) OnSuccess(time.Duration)        {}
-func (noopObserver) OnFailure(error, time.Duration) {}
-func (noopObserver) OnRetry(int, error)             {}
-func (noopObserver) OnStateChange(State, State)     {}
-func (noopObserver) OnRateLimited()                 {}
+func (Noop) OnSuccess(time.Duration)        {}
+func (Noop) OnFailure(error, time.Duration) {}
+func (Noop) OnRetry(int, error)             {}
+func (Noop) OnStateChange(State, State)     {}
+func (Noop) OnRateLimited()                 {}
 
 // State represents circuit breaker state.
 type State int

@@ -1,36 +1,35 @@
-package flowguard
+// Package hedge implements hedged requests — Google's "Tail at Scale"
+// pattern for reducing P99 latency on idempotent operations at the cost
+// of ~5% extra load.
+package hedge
 
 import (
 	"context"
 	"time"
+
+	"github.com/yabanci/flowguard/observer"
 )
 
-// Hedge implements hedged requests — if the primary call is slow, fire a
-// second (or third) attempt after a delay and take whichever finishes first.
-//
-// This is the "Tail at Scale" pattern from Google's 2013 paper. Instead of
-// waiting for the slow P99 tail, you send a redundant request after the
-// expected latency and race them. Dramatically reduces tail latency for
-// idempotent operations at the cost of ~5% extra load.
+// Hedge fires redundant copies of a slow call and returns the first success.
 //
 // IMPORTANT: fn must be safe to call concurrently and should be idempotent.
 // All hedged calls share the same context, so cancelling one cancels all.
 type Hedge struct {
-	delay     time.Duration // how long to wait before launching hedge
-	maxHedges int           // max extra requests (1 = at most 2 total)
-	observer  Observer
+	delay     time.Duration
+	maxHedges int
+	observer  observer.Observer
 }
 
-// HedgeOption configures a Hedge.
-type HedgeOption func(*Hedge)
+// Option configures a Hedge.
+type Option func(*Hedge)
 
-// NewHedge creates a hedger. delay is how long to wait before sending
-// the first hedge request. Think of it as your P95 or P99 latency.
-func NewHedge(delay time.Duration, opts ...HedgeOption) *Hedge {
+// New creates a hedger. delay is how long to wait before sending the first
+// hedge — think of it as your P95 or P99 latency.
+func New(delay time.Duration, opts ...Option) *Hedge {
 	h := &Hedge{
 		delay:     delay,
-		maxHedges: 1, // one extra request by default
-		observer:  noopObserver{},
+		maxHedges: 1,
+		observer:  observer.Noop{},
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -40,13 +39,12 @@ func NewHedge(delay time.Duration, opts ...HedgeOption) *Hedge {
 
 // WithMaxHedges sets how many extra requests to send. Default is 1.
 // Setting to 2 means up to 3 total requests (original + 2 hedges).
-// Be careful with this — each hedge is extra load on the downstream.
-func WithMaxHedges(n int) HedgeOption {
+func WithMaxHedges(n int) Option {
 	return func(h *Hedge) { h.maxHedges = n }
 }
 
-// WithHedgeObserver attaches an observer.
-func WithHedgeObserver(o Observer) HedgeOption {
+// WithObserver attaches an observer.
+func WithObserver(o observer.Observer) Option {
 	return func(h *Hedge) { h.observer = o }
 }
 
@@ -54,7 +52,6 @@ func WithHedgeObserver(o Observer) HedgeOption {
 // hedged copies. Returns the result of whichever finishes first successfully.
 // If all copies fail, returns the first error.
 func (h *Hedge) Do(ctx context.Context, fn func(ctx context.Context) error) error {
-	// total attempts = 1 (primary) + maxHedges
 	total := 1 + h.maxHedges
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -72,7 +69,6 @@ func (h *Hedge) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 		results <- result{err: err, idx: i}
 	}
 
-	// launch primary
 	go run(0)
 
 	var firstErr error
@@ -92,8 +88,6 @@ func (h *Hedge) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 				firstErr = r.err
 			}
 
-			// if a call failed and we still have hedge budget, launch one immediately
-			// instead of waiting for the delay timer
 			if hedgesLaunched < h.maxHedges {
 				hedgesLaunched++
 				h.observer.OnRetry(hedgesLaunched, r.err)
@@ -101,7 +95,6 @@ func (h *Hedge) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 				continue
 			}
 
-			// all launched copies reported back and none succeeded
 			if received >= 1+hedgesLaunched {
 				h.observer.OnFailure(firstErr, time.Since(start))
 				return firstErr
@@ -110,7 +103,7 @@ func (h *Hedge) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 		case <-time.After(h.delay):
 			if hedgesLaunched < h.maxHedges {
 				hedgesLaunched++
-				h.observer.OnRetry(hedgesLaunched, nil) // reuse OnRetry for hedge events
+				h.observer.OnRetry(hedgesLaunched, nil)
 				go run(hedgesLaunched)
 			}
 		}

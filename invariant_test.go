@@ -1,4 +1,4 @@
-package flowguard
+package flowguard_test
 
 import (
 	"context"
@@ -6,23 +6,31 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard/bulkhead"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/internal/fakeclock"
+	"github.com/yabanci/flowguard/loadshed"
+	"github.com/yabanci/flowguard/observer"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
 // These tests verify structural invariants that must always hold,
 // regardless of timing, concurrency, or input.
 
 func TestInvariant_CB_OpenNeverCallsFn(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
-		WithFailureThreshold(1),
-		WithCircuitBreakerClock(clk),
+	clk := fakeclock.New(time.Now())
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithClock(clk),
 	)
 	ctx := context.Background()
 
 	// trip it
 	cb.Do(ctx, func(ctx context.Context) error { return errBoom })
 
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatal("should be open")
 	}
 
@@ -39,10 +47,10 @@ func TestInvariant_CB_OpenNeverCallsFn(t *testing.T) {
 }
 
 func TestInvariant_CB_OpenNeverCallsFn_Concurrent(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
-		WithFailureThreshold(1),
-		WithCircuitBreakerClock(clk),
+	clk := fakeclock.New(time.Now())
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithClock(clk),
 	)
 	ctx := context.Background()
 
@@ -71,11 +79,11 @@ func TestInvariant_CB_OpenNeverCallsFn_Concurrent(t *testing.T) {
 func TestInvariant_Retry_MaxCallCount(t *testing.T) {
 	// retry must call fn at most maxRetries+1 times, always
 	for maxRetries := 0; maxRetries <= 10; maxRetries++ {
-		clk := newMockClock(time.Now())
-		r := NewRetry(
-			WithMaxRetries(maxRetries),
-			WithRetryClock(clk),
-			WithJitter(0),
+		clk := fakeclock.New(time.Now())
+		r := retry.New(
+			retry.WithMaxRetries(maxRetries),
+			retry.WithClock(clk),
+			retry.WithJitter(0),
 		)
 
 		calls := 0
@@ -95,8 +103,8 @@ func TestInvariant_RateLimiter_NeverExceedsBurst(t *testing.T) {
 	// Allow() should never return true more than burst times without time passing.
 	// Use mock clock so real time doesn't cause refills.
 	for _, burst := range []int{1, 5, 10, 50, 100} {
-		clk := newMockClock(time.Now())
-		rl := NewRateLimiter(1000, burst, WithRateLimiterClock(clk))
+		clk := fakeclock.New(time.Now())
+		rl := ratelimit.NewTokenBucket(1000, burst, ratelimit.WithClock(clk))
 
 		allowed := 0
 		for i := 0; i < burst*3; i++ {
@@ -114,7 +122,7 @@ func TestInvariant_RateLimiter_NeverExceedsBurst(t *testing.T) {
 
 func TestInvariant_RateLimiter_NeverExceedsBurst_Concurrent(t *testing.T) {
 	burst := 50
-	rl := NewRateLimiter(1, burst) // 1/s rate, burst of 50
+	rl := ratelimit.NewTokenBucket(1, burst) // 1/s rate, burst of 50
 
 	var allowed atomic.Int32
 	var wg sync.WaitGroup
@@ -138,7 +146,7 @@ func TestInvariant_RateLimiter_NeverExceedsBurst_Concurrent(t *testing.T) {
 
 func TestInvariant_Bulkhead_NeverExceedsConcurrency(t *testing.T) {
 	maxConc := 5
-	b := NewBulkhead(maxConc, WithMaxWaitDuration(time.Second))
+	b := bulkhead.New(maxConc, bulkhead.WithMaxWait(time.Second))
 	ctx := context.Background()
 
 	var peak atomic.Int32
@@ -174,8 +182,8 @@ func TestInvariant_Bulkhead_NeverExceedsConcurrency(t *testing.T) {
 
 func TestInvariant_LoadShedder_LimitStaysInBounds(t *testing.T) {
 	min, max := 5, 50
-	ls := NewLoadShedder(20, 10*time.Millisecond,
-		WithLoadShedLimits(min, max),
+	ls := loadshed.New(20, 10*time.Millisecond,
+		loadshed.WithLimits(min, max),
 	)
 	ctx := context.Background()
 
@@ -202,8 +210,8 @@ func TestInvariant_LoadShedder_LimitStaysInBounds(t *testing.T) {
 
 func TestInvariant_LoadShedder_LimitStaysInBounds_Concurrent(t *testing.T) {
 	min, max := 3, 30
-	ls := NewLoadShedder(10, 5*time.Millisecond,
-		WithLoadShedLimits(min, max),
+	ls := loadshed.New(10, 5*time.Millisecond,
+		loadshed.WithLimits(min, max),
 	)
 	ctx := context.Background()
 
@@ -236,14 +244,14 @@ func TestInvariant_LoadShedder_LimitStaysInBounds_Concurrent(t *testing.T) {
 func TestInvariant_CB_StateTransitions(t *testing.T) {
 	// Valid transitions: Closed→Open, Open→HalfOpen, HalfOpen→Closed, HalfOpen→Open
 	// Invalid: Closed→HalfOpen, Open→Closed
-	clk := newMockClock(time.Now())
+	clk := fakeclock.New(time.Now())
 	obs := &testObserver{}
-	cb := NewCircuitBreaker(
-		WithFailureThreshold(2),
-		WithSuccessThreshold(2),
-		WithOpenTimeout(time.Second),
-		WithCircuitBreakerClock(clk),
-		WithCircuitBreakerObserver(obs),
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(2),
+		circuitbreaker.WithSuccessThreshold(2),
+		circuitbreaker.WithOpenTimeout(time.Second),
+		circuitbreaker.WithClock(clk),
+		circuitbreaker.WithObserver(obs),
 	)
 
 	ctx := context.Background()
@@ -268,11 +276,11 @@ func TestInvariant_CB_StateTransitions(t *testing.T) {
 	cb.Do(ctx, func(ctx context.Context) error { return nil })
 
 	// verify all transitions are valid
-	validTransitions := map[[2]State]bool{
-		{StateClosed, StateOpen}:     true,
-		{StateOpen, StateHalfOpen}:   true,
-		{StateHalfOpen, StateOpen}:   true,
-		{StateHalfOpen, StateClosed}: true,
+	validTransitions := map[[2]observer.State]bool{
+		{observer.StateClosed, observer.StateOpen}:     true,
+		{observer.StateOpen, observer.StateHalfOpen}:   true,
+		{observer.StateHalfOpen, observer.StateOpen}:   true,
+		{observer.StateHalfOpen, observer.StateClosed}: true,
 	}
 
 	for _, change := range obs.stateChanges {
@@ -282,12 +290,12 @@ func TestInvariant_CB_StateTransitions(t *testing.T) {
 		}
 	}
 
-	expected := [][2]State{
-		{StateClosed, StateOpen},
-		{StateOpen, StateHalfOpen},
-		{StateHalfOpen, StateOpen},
-		{StateOpen, StateHalfOpen},
-		{StateHalfOpen, StateClosed},
+	expected := [][2]observer.State{
+		{observer.StateClosed, observer.StateOpen},
+		{observer.StateOpen, observer.StateHalfOpen},
+		{observer.StateHalfOpen, observer.StateOpen},
+		{observer.StateOpen, observer.StateHalfOpen},
+		{observer.StateHalfOpen, observer.StateClosed},
 	}
 
 	if len(obs.stateChanges) != len(expected) {

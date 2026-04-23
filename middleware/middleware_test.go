@@ -1,22 +1,31 @@
-package flowguard
+package middleware_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/internal/fakeclock"
+	"github.com/yabanci/flowguard/middleware"
+	"github.com/yabanci/flowguard/ratelimit"
 )
 
-func TestHTTPMiddleware_PassThrough(t *testing.T) {
-	p := NewPolicy() // no components = pass through
+var errBoom = errors.New("boom")
+
+func TestHTTPServer_PassThrough(t *testing.T) {
+	p := flowguard.NewPolicy()
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 
-	wrapped := HTTPMiddleware(p)(handler)
+	wrapped := middleware.HTTPServer(p)(handler)
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	rec := httptest.NewRecorder()
@@ -27,18 +36,17 @@ func TestHTTPMiddleware_PassThrough(t *testing.T) {
 	}
 }
 
-func TestHTTPMiddleware_RateLimited(t *testing.T) {
-	clk := newMockClock(time.Now())
-	rl := NewRateLimiter(100, 1, WithRateLimiterClock(clk)) // burst of 1
+func TestHTTPServer_RateLimited(t *testing.T) {
+	clk := fakeclock.New(time.Now())
+	rl := ratelimit.NewTokenBucket(100, 1, ratelimit.WithClock(clk))
 
-	p := NewPolicy(WithPolicyRateLimiter(rl))
+	p := flowguard.NewPolicy(flowguard.WithRateLimiter(rl))
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	wrapped := HTTPMiddleware(p)(handler)
+	wrapped := middleware.HTTPServer(p)(handler)
 
-	// first request uses the token
 	req1 := httptest.NewRequest("GET", "/", nil)
 	rec1 := httptest.NewRecorder()
 	wrapped.ServeHTTP(rec1, req1)
@@ -47,7 +55,6 @@ func TestHTTPMiddleware_RateLimited(t *testing.T) {
 		t.Fatalf("first request should pass, got %d", rec1.Code)
 	}
 
-	// refill so we don't block forever — advance time
 	clk.Advance(time.Second)
 
 	req2 := httptest.NewRequest("GET", "/", nil)
@@ -59,21 +66,20 @@ func TestHTTPMiddleware_RateLimited(t *testing.T) {
 	}
 }
 
-func TestHTTPMiddleware_CircuitOpen(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
-		WithFailureThreshold(1),
-		WithCircuitBreakerClock(clk),
+func TestHTTPServer_CircuitOpen(t *testing.T) {
+	clk := fakeclock.New(time.Now())
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithClock(clk),
 	)
-	p := NewPolicy(WithPolicyCircuitBreaker(cb))
+	p := flowguard.NewPolicy(flowguard.WithCircuitBreaker(cb))
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	wrapped := HTTPMiddleware(p)(handler)
+	wrapped := middleware.HTTPServer(p)(handler)
 
-	// trip the CB directly
-	cb.Do(context.Background(), func(_ context.Context) error { return errBoom })
+	_ = cb.Do(context.Background(), func(_ context.Context) error { return errBoom })
 
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()

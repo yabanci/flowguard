@@ -1,4 +1,4 @@
-package flowguard
+package hedge
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 func TestHedge_FastPrimary(t *testing.T) {
-	h := NewHedge(100 * time.Millisecond)
+	h := New(100 * time.Millisecond)
 
 	var calls atomic.Int32
 	err := h.Do(context.Background(), func(ctx context.Context) error {
@@ -28,7 +28,7 @@ func TestHedge_FastPrimary(t *testing.T) {
 }
 
 func TestHedge_SlowPrimaryHedgeWins(t *testing.T) {
-	h := NewHedge(50 * time.Millisecond)
+	h := New(50 * time.Millisecond)
 
 	var calls atomic.Int32
 	err := h.Do(context.Background(), func(ctx context.Context) error {
@@ -48,7 +48,7 @@ func TestHedge_SlowPrimaryHedgeWins(t *testing.T) {
 }
 
 func TestHedge_AllFail(t *testing.T) {
-	h := NewHedge(10 * time.Millisecond)
+	h := New(10 * time.Millisecond)
 
 	err := h.Do(context.Background(), func(ctx context.Context) error {
 		return errBoom
@@ -60,7 +60,7 @@ func TestHedge_AllFail(t *testing.T) {
 }
 
 func TestHedge_ContextCancelled(t *testing.T) {
-	h := NewHedge(10 * time.Millisecond)
+	h := New(10 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -75,7 +75,7 @@ func TestHedge_ContextCancelled(t *testing.T) {
 }
 
 func TestHedge_MultipleHedges(t *testing.T) {
-	h := NewHedge(10*time.Millisecond, WithMaxHedges(2))
+	h := New(10*time.Millisecond, WithMaxHedges(2))
 
 	var calls atomic.Int32
 	err := h.Do(context.Background(), func(ctx context.Context) error {
@@ -100,7 +100,7 @@ func TestHedge_MultipleHedges(t *testing.T) {
 }
 
 func TestHedge_PrimaryFailsHedgeSucceeds(t *testing.T) {
-	h := NewHedge(10 * time.Millisecond)
+	h := New(10 * time.Millisecond)
 
 	var calls atomic.Int32
 	err := h.Do(context.Background(), func(ctx context.Context) error {

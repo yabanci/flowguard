@@ -10,24 +10,27 @@ import (
 	"time"
 
 	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
 func main() {
-	rl := flowguard.NewRateLimiter(5, 10) // 5 req/s, burst of 10
-	cb := flowguard.NewCircuitBreaker(
-		flowguard.WithFailureThreshold(3),
-		flowguard.WithOpenTimeout(15*time.Second),
+	rl := ratelimit.NewTokenBucket(5, 10) // 5 req/s, burst of 10
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(3),
+		circuitbreaker.WithOpenTimeout(15*time.Second),
 	)
-	retry := flowguard.NewRetry(
-		flowguard.WithMaxRetries(3),
-		flowguard.WithExponentialBackoff(200*time.Millisecond),
-		flowguard.WithMaxBackoff(5*time.Second),
+	retry := retry.New(
+		retry.WithMaxRetries(3),
+		retry.WithExponentialBackoff(200*time.Millisecond),
+		retry.WithMaxBackoff(5*time.Second),
 	)
 
 	policy := flowguard.NewPolicy(
-		flowguard.WithPolicyRateLimiter(rl),
-		flowguard.WithPolicyCircuitBreaker(cb),
-		flowguard.WithPolicyRetry(retry),
+		flowguard.WithRateLimiter(rl),
+		flowguard.WithCircuitBreaker(cb),
+		flowguard.WithRetry(retry),
 	)
 
 	ctx := context.Background()
@@ -50,7 +53,7 @@ func main() {
 				return fmt.Errorf("server error: %d", resp.StatusCode)
 			}
 			b, _ := io.ReadAll(resp.Body)
-			body = string(b[:minInt(len(b), 80)]) // just first 80 chars
+			body = string(b[:min(len(b), 80)]) // just first 80 chars
 			return nil
 		})
 
@@ -60,12 +63,4 @@ func main() {
 			fmt.Printf("[%d] OK: %s...\n", i, body)
 		}
 	}
-}
-
-// TODO: remove when we bump to go 1.21+ (min is builtin there)
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

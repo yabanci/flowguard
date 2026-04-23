@@ -1,14 +1,16 @@
-package flowguard
+package ratelimit
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard/internal/fakeclock"
 )
 
 func TestTokenBucket_Allow(t *testing.T) {
-	clk := newMockClock(time.Now())
-	rl := NewRateLimiter(10, 3, WithRateLimiterClock(clk))
+	clk := fakeclock.New(time.Now())
+	rl := NewTokenBucket(10, 3, WithClock(clk))
 
 	// should allow burst
 	for i := 0; i < 3; i++ {
@@ -36,8 +38,8 @@ func TestTokenBucket_Allow(t *testing.T) {
 }
 
 func TestTokenBucket_Wait(t *testing.T) {
-	clk := newMockClock(time.Now())
-	rl := NewRateLimiter(10, 1, WithRateLimiterClock(clk))
+	clk := fakeclock.New(time.Now())
+	rl := NewTokenBucket(10, 1, WithClock(clk))
 
 	ctx := context.Background()
 
@@ -66,8 +68,8 @@ func TestTokenBucket_Wait(t *testing.T) {
 }
 
 func TestTokenBucket_WaitCancelled(t *testing.T) {
-	clk := newMockClock(time.Now())
-	rl := NewRateLimiter(1, 1, WithRateLimiterClock(clk))
+	clk := fakeclock.New(time.Now())
+	rl := NewTokenBucket(1, 1, WithClock(clk))
 
 	// drain the token
 	rl.Allow()
@@ -82,8 +84,8 @@ func TestTokenBucket_WaitCancelled(t *testing.T) {
 }
 
 func TestTokenBucket_Reserve(t *testing.T) {
-	clk := newMockClock(time.Now())
-	rl := NewRateLimiter(10, 2, WithRateLimiterClock(clk))
+	clk := fakeclock.New(time.Now())
+	rl := NewTokenBucket(10, 2, WithClock(clk))
 
 	// full bucket — reserve should be 0
 	if d := rl.Reserve(); d != 0 {
@@ -101,8 +103,8 @@ func TestTokenBucket_Reserve(t *testing.T) {
 }
 
 func TestSlidingWindow_Basic(t *testing.T) {
-	clk := newMockClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
-	rl := NewSlidingWindowLimiter(5, time.Second, WithRateLimiterClock(clk))
+	clk := fakeclock.New(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	rl := NewSlidingWindow(5, time.Second, WithClock(clk))
 
 	// should allow up to limit
 	for i := 0; i < 5; i++ {
@@ -118,8 +120,8 @@ func TestSlidingWindow_Basic(t *testing.T) {
 }
 
 func TestSlidingWindow_Expiry(t *testing.T) {
-	clk := newMockClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
-	rl := NewSlidingWindowLimiter(3, time.Second, WithRateLimiterClock(clk))
+	clk := fakeclock.New(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	rl := NewSlidingWindow(3, time.Second, WithClock(clk))
 
 	// fill up
 	for i := 0; i < 3; i++ {
@@ -139,7 +141,7 @@ func TestSlidingWindow_Expiry(t *testing.T) {
 }
 
 func TestAIMD_Basic(t *testing.T) {
-	rl := NewAIMDLimiter(5, 1, 20)
+	rl := NewAIMD(5, 1, 20)
 
 	// should allow 5 requests
 	for i := 0; i < 5; i++ {
@@ -153,7 +155,7 @@ func TestAIMD_Basic(t *testing.T) {
 }
 
 func TestAIMD_Increase(t *testing.T) {
-	rl := NewAIMDLimiter(3, 1, 10)
+	rl := NewAIMD(3, 1, 10)
 
 	rl.OnSuccess() // limit → 4
 	rl.OnSuccess() // limit → 5
@@ -173,7 +175,7 @@ func TestAIMD_Increase(t *testing.T) {
 }
 
 func TestAIMD_Decrease(t *testing.T) {
-	rl := NewAIMDLimiter(10, 2, 20)
+	rl := NewAIMD(10, 2, 20)
 
 	rl.OnFailure() // limit → 5
 	if got := rl.CurrentLimit(); got != 5 {
@@ -192,7 +194,7 @@ func TestAIMD_Decrease(t *testing.T) {
 }
 
 func TestAIMD_MaxCap(t *testing.T) {
-	rl := NewAIMDLimiter(9, 1, 10)
+	rl := NewAIMD(9, 1, 10)
 
 	rl.OnSuccess() // → 10
 	rl.OnSuccess() // should stay at 10 (max)

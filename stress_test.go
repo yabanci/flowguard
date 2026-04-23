@@ -1,4 +1,4 @@
-package flowguard
+package flowguard_test
 
 import (
 	"context"
@@ -7,6 +7,14 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/bulkhead"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/loadshed"
+	"github.com/yabanci/flowguard/observer"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
 // These tests run for a few seconds under sustained load to catch
@@ -17,7 +25,7 @@ func TestStress_RateLimiterUnderLoad(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 
-	rl := NewRateLimiter(100, 20)
+	rl := ratelimit.NewTokenBucket(100, 20)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -55,10 +63,10 @@ func TestStress_CircuitBreakerMixedLoad(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 
-	cb := NewCircuitBreaker(
-		WithFailureThreshold(10),
-		WithOpenTimeout(200*time.Millisecond),
-		WithSuccessThreshold(3),
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(10),
+		circuitbreaker.WithOpenTimeout(200*time.Millisecond),
+		circuitbreaker.WithSuccessThreshold(3),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -79,7 +87,7 @@ func TestStress_CircuitBreakerMixedLoad(t *testing.T) {
 					return nil
 				})
 				total.Add(1)
-				if err == ErrCircuitOpen || err == ErrTooManyRequests {
+				if err == circuitbreaker.ErrOpen || err == circuitbreaker.ErrTooManyRequests {
 					opens.Add(1)
 				} else if err != nil {
 					errors.Add(1)
@@ -93,7 +101,7 @@ func TestStress_CircuitBreakerMixedLoad(t *testing.T) {
 
 	// state should be valid
 	s := cb.State()
-	if s != StateClosed && s != StateOpen && s != StateHalfOpen {
+	if s != observer.StateClosed && s != observer.StateOpen && s != observer.StateHalfOpen {
 		t.Fatalf("invalid final state: %v", s)
 	}
 
@@ -106,8 +114,8 @@ func TestStress_LoadShedderConvergence(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 
-	ls := NewLoadShedder(30, 20*time.Millisecond,
-		WithLoadShedLimits(5, 100),
+	ls := loadshed.New(30, 20*time.Millisecond,
+		loadshed.WithLimits(5, 100),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -126,7 +134,7 @@ func TestStress_LoadShedderConvergence(t *testing.T) {
 					time.Sleep(time.Duration(5+rand.Intn(30)) * time.Millisecond)
 					return nil
 				})
-				if err == ErrLoadShed {
+				if err == loadshed.ErrShed {
 					shed.Add(1)
 				} else if err == nil {
 					ok.Add(1)
@@ -152,7 +160,7 @@ func TestStress_BulkheadUnderPressure(t *testing.T) {
 	}
 
 	maxConc := 10
-	b := NewBulkhead(maxConc, WithMaxWaitDuration(50*time.Millisecond))
+	b := bulkhead.New(maxConc, bulkhead.WithMaxWait(50*time.Millisecond))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -204,15 +212,15 @@ func TestStress_PolicyEndToEnd(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 
-	p := NewPolicy(
-		WithPolicyRateLimiter(NewRateLimiter(200, 50)),
-		WithPolicyCircuitBreaker(NewCircuitBreaker(WithFailureThreshold(20))),
-		WithPolicyRetry(NewRetry(
-			WithMaxRetries(2),
-			WithConstantBackoff(time.Millisecond),
-			WithJitter(0),
+	p := flowguard.NewPolicy(
+		flowguard.WithRateLimiter(ratelimit.NewTokenBucket(200, 50)),
+		flowguard.WithCircuitBreaker(circuitbreaker.New(circuitbreaker.WithFailureThreshold(20))),
+		flowguard.WithRetry(retry.New(
+			retry.WithMaxRetries(2),
+			retry.WithConstantBackoff(time.Millisecond),
+			retry.WithJitter(0),
 		)),
-		WithPolicyBulkhead(NewBulkhead(20, WithMaxWaitDuration(100*time.Millisecond))),
+		flowguard.WithBulkhead(bulkhead.New(20, bulkhead.WithMaxWait(100*time.Millisecond))),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

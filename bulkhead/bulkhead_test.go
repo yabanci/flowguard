@@ -1,4 +1,4 @@
-package flowguard
+package bulkhead
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 )
 
 func TestBulkhead_Basic(t *testing.T) {
-	b := NewBulkhead(2)
+	b := New(2)
 	ctx := context.Background()
 
 	err := b.Do(ctx, func(ctx context.Context) error {
@@ -22,7 +22,7 @@ func TestBulkhead_Basic(t *testing.T) {
 }
 
 func TestBulkhead_ConcurrencyLimit(t *testing.T) {
-	b := NewBulkhead(2, WithMaxWaitDuration(0))
+	b := New(2, WithMaxWait(0))
 	ctx := context.Background()
 
 	gate := make(chan struct{})
@@ -49,8 +49,8 @@ func TestBulkhead_ConcurrencyLimit(t *testing.T) {
 
 	// third call should be rejected immediately
 	err := b.Do(ctx, func(ctx context.Context) error { return nil })
-	if !errors.Is(err, ErrBulkheadFull) {
-		t.Fatalf("expected ErrBulkheadFull, got %v", err)
+	if !errors.Is(err, ErrFull) {
+		t.Fatalf("expected ErrFull, got %v", err)
 	}
 
 	close(gate)
@@ -58,7 +58,7 @@ func TestBulkhead_ConcurrencyLimit(t *testing.T) {
 }
 
 func TestBulkhead_WaitForSlot(t *testing.T) {
-	b := NewBulkhead(1, WithMaxWaitDuration(500*time.Millisecond))
+	b := New(1, WithMaxWait(500*time.Millisecond))
 	ctx := context.Background()
 
 	gate := make(chan struct{})
@@ -91,7 +91,7 @@ func TestBulkhead_WaitForSlot(t *testing.T) {
 }
 
 func TestBulkhead_WaitTimeout(t *testing.T) {
-	b := NewBulkhead(1, WithMaxWaitDuration(10*time.Millisecond))
+	b := New(1, WithMaxWait(10*time.Millisecond))
 	ctx := context.Background()
 
 	gate := make(chan struct{})
@@ -106,13 +106,13 @@ func TestBulkhead_WaitTimeout(t *testing.T) {
 
 	// this should time out
 	err := b.Do(ctx, func(ctx context.Context) error { return nil })
-	if !errors.Is(err, ErrBulkheadFull) {
-		t.Fatalf("expected ErrBulkheadFull after timeout, got %v", err)
+	if !errors.Is(err, ErrFull) {
+		t.Fatalf("expected ErrFull after timeout, got %v", err)
 	}
 }
 
 func TestBulkhead_ContextCancelled(t *testing.T) {
-	b := NewBulkhead(1, WithMaxWaitDuration(5*time.Second))
+	b := New(1, WithMaxWait(5*time.Second))
 
 	gate := make(chan struct{})
 	defer close(gate)
@@ -134,7 +134,7 @@ func TestBulkhead_ContextCancelled(t *testing.T) {
 }
 
 func TestBulkhead_ActiveCount(t *testing.T) {
-	b := NewBulkhead(5)
+	b := New(5)
 	ctx := context.Background()
 
 	if b.ActiveCount() != 0 {

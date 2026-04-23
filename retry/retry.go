@@ -1,11 +1,18 @@
-package flowguard
+// Package retry runs a function with configurable backoff. Exports
+// Permanent(err) / IsPermanent so callers — notably flowguard.Policy —
+// can mark an error non-retryable without a type assertion.
+package retry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
 	"time"
+
+	"github.com/yabanci/flowguard/clock"
+	"github.com/yabanci/flowguard/observer"
 )
 
 // Retry executes a function with configurable retry logic.
@@ -14,26 +21,26 @@ type Retry struct {
 	maxRetries int
 	baseDelay  time.Duration
 	maxBackoff time.Duration
-	jitter     float64 // 0.0 to 1.0
-	constant   bool    // if true, use constant backoff instead of exponential
+	jitter     float64
+	constant   bool
 	retryIf    func(error) bool
-	clock      Clock
-	observer   Observer
+	clock      clock.Clock
+	observer   observer.Observer
 }
 
-// RetryOption configures a Retry.
-type RetryOption func(*Retry)
+// Option configures a Retry.
+type Option func(*Retry)
 
-// NewRetry creates a retry with exponential backoff.
+// New creates a retry with exponential backoff.
 // Defaults: 3 retries, 100ms base, 30s max, 0.2 jitter.
-func NewRetry(opts ...RetryOption) *Retry {
+func New(opts ...Option) *Retry {
 	r := &Retry{
 		maxRetries: 3,
 		baseDelay:  100 * time.Millisecond,
 		maxBackoff: 30 * time.Second,
 		jitter:     0.2,
-		clock:      defaultClock{},
-		observer:   noopObserver{},
+		clock:      clock.Real(),
+		observer:   observer.Noop{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -41,47 +48,76 @@ func NewRetry(opts ...RetryOption) *Retry {
 	return r
 }
 
-func WithMaxRetries(n int) RetryOption {
+func WithMaxRetries(n int) Option {
 	return func(r *Retry) { r.maxRetries = n }
 }
 
-func WithConstantBackoff(d time.Duration) RetryOption {
+func WithConstantBackoff(d time.Duration) Option {
 	return func(r *Retry) {
 		r.baseDelay = d
 		r.constant = true
 	}
 }
 
-func WithExponentialBackoff(base time.Duration) RetryOption {
+func WithExponentialBackoff(base time.Duration) Option {
 	return func(r *Retry) {
 		r.baseDelay = base
 		r.constant = false
 	}
 }
 
-// WithJitter sets the jitter factor (0.0 to 1.0).
-// Uses Full Jitter from the AWS architecture blog:
-// sleep = random_between(0, min(cap, base * 2^attempt))
-func WithJitter(j float64) RetryOption {
+// WithJitter sets the jitter factor (0.0 to 1.0). Uses Full Jitter:
+// sleep = random_between(0, min(cap, base * 2^attempt)).
+func WithJitter(j float64) Option {
 	return func(r *Retry) { r.jitter = j }
 }
 
-func WithMaxBackoff(d time.Duration) RetryOption {
+func WithMaxBackoff(d time.Duration) Option {
 	return func(r *Retry) { r.maxBackoff = d }
 }
 
 // WithRetryIf sets a predicate for which errors should be retried.
 // By default, everything except context.Canceled and context.DeadlineExceeded.
-func WithRetryIf(fn func(error) bool) RetryOption {
+func WithRetryIf(fn func(error) bool) Option {
 	return func(r *Retry) { r.retryIf = fn }
 }
 
-func WithRetryClock(c Clock) RetryOption {
+func WithClock(c clock.Clock) Option {
 	return func(r *Retry) { r.clock = c }
 }
 
-func WithRetryObserver(o Observer) RetryOption {
+func WithObserver(o observer.Observer) Option {
 	return func(r *Retry) { r.observer = o }
+}
+
+// permanent wraps errors that Retry must not retry.
+type permanent struct{ err error }
+
+func (p *permanent) Error() string { return p.err.Error() }
+func (p *permanent) Unwrap() error { return p.err }
+
+// Permanent wraps err so that Retry stops on it instead of retrying.
+// The returned error unwraps to err, so errors.Is / errors.As still work.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanent{err: err}
+}
+
+// IsPermanent reports whether err was wrapped with Permanent.
+func IsPermanent(err error) bool {
+	var p *permanent
+	return errors.As(err, &p)
+}
+
+// Unwrap returns the inner error if err was wrapped with Permanent, otherwise err.
+func Unwrap(err error) error {
+	var p *permanent
+	if errors.As(err, &p) {
+		return p.err
+	}
+	return err
 }
 
 // Do executes fn, retrying on failure according to the configured policy.
@@ -101,22 +137,18 @@ func (r *Retry) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 
 		lastErr = err
 
-		// permanent errors should not be retried (used by Policy)
-		if _, ok := err.(*permanentError); ok {
+		if IsPermanent(err) {
 			return err
 		}
 
-		// don't retry context errors
 		if err == context.Canceled || err == context.DeadlineExceeded {
 			return err
 		}
 
-		// check custom retry predicate
 		if r.retryIf != nil && !r.retryIf(err) {
 			return err
 		}
 
-		// was that the last attempt?
 		if attempt == r.maxRetries {
 			break
 		}
@@ -124,7 +156,6 @@ func (r *Retry) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 		r.observer.OnRetry(attempt+1, err)
 
 		delay := r.calcDelay(attempt)
-		// this is a bit gnarly but we need to respect both the clock and ctx
 		sleepDone := make(chan struct{})
 		go func() {
 			r.clock.Sleep(delay)
@@ -138,7 +169,7 @@ func (r *Retry) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 		}
 	}
 
-	return fmt.Errorf("flowguard: after %d retries: %w", r.maxRetries, lastErr)
+	return fmt.Errorf("flowguard/retry: after %d retries: %w", r.maxRetries, lastErr)
 }
 
 func (r *Retry) calcDelay(attempt int) time.Duration {
@@ -146,7 +177,6 @@ func (r *Retry) calcDelay(attempt int) time.Duration {
 		return r.applyJitter(r.baseDelay)
 	}
 
-	// exponential: base * 2^attempt
 	delay := float64(r.baseDelay) * math.Pow(2, float64(attempt))
 	if delay > float64(r.maxBackoff) {
 		delay = float64(r.maxBackoff)
@@ -158,8 +188,6 @@ func (r *Retry) applyJitter(d time.Duration) time.Duration {
 	if r.jitter <= 0 {
 		return d
 	}
-	// Full Jitter: sleep = random(0, d)
-	// But we scale by jitter factor so 0.2 means ±20%
 	jit := float64(d) * r.jitter
 	delta := (rand.Float64()*2 - 1) * jit //nolint:gosec // jitter doesn't need crypto rand
 	result := time.Duration(float64(d) + delta)

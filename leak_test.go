@@ -1,10 +1,18 @@
-package flowguard
+package flowguard_test
 
 import (
 	"context"
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/bulkhead"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/hedge"
+	"github.com/yabanci/flowguard/internal/fakeclock"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
 // goroutineCheck captures goroutine count before a test and verifies
@@ -39,7 +47,7 @@ func TestLeak_HedgeFastSuccess(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	h := NewHedge(50 * time.Millisecond)
+	h := hedge.New(50 * time.Millisecond)
 	for i := 0; i < 20; i++ {
 		h.Do(context.Background(), func(ctx context.Context) error {
 			return nil
@@ -51,7 +59,7 @@ func TestLeak_HedgeSlowPrimary(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	h := NewHedge(10 * time.Millisecond)
+	h := hedge.New(10 * time.Millisecond)
 	for i := 0; i < 10; i++ {
 		h.Do(context.Background(), func(ctx context.Context) error {
 			select {
@@ -68,7 +76,7 @@ func TestLeak_HedgeAllFail(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	h := NewHedge(5*time.Millisecond, WithMaxHedges(2))
+	h := hedge.New(5*time.Millisecond, hedge.WithMaxHedges(2))
 	for i := 0; i < 10; i++ {
 		h.Do(context.Background(), func(ctx context.Context) error {
 			return errBoom
@@ -80,7 +88,7 @@ func TestLeak_HedgeCancelled(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	h := NewHedge(10 * time.Millisecond)
+	h := hedge.New(10 * time.Millisecond)
 	for i := 0; i < 10; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 		h.Do(ctx, func(ctx context.Context) error {
@@ -95,8 +103,8 @@ func TestLeak_RetryExhausted(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	clk := newMockClock(time.Now())
-	r := NewRetry(WithMaxRetries(5), WithRetryClock(clk), WithJitter(0))
+	clk := fakeclock.New(time.Now())
+	r := retry.New(retry.WithMaxRetries(5), retry.WithClock(clk), retry.WithJitter(0))
 
 	for i := 0; i < 10; i++ {
 		r.Do(context.Background(), func(ctx context.Context) error {
@@ -109,7 +117,7 @@ func TestLeak_RateLimiterWait(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	rl := NewRateLimiter(1000, 10)
+	rl := ratelimit.NewTokenBucket(1000, 10)
 	ctx := context.Background()
 
 	for i := 0; i < 20; i++ {
@@ -121,7 +129,7 @@ func TestLeak_RateLimiterWaitCancelled(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	rl := NewRateLimiter(1, 1)
+	rl := ratelimit.NewTokenBucket(1, 1)
 	rl.Allow() // drain
 
 	for i := 0; i < 10; i++ {
@@ -135,12 +143,12 @@ func TestLeak_PolicyFullStack(t *testing.T) {
 	check := goroutineCheck(t)
 	defer check()
 
-	clk := newMockClock(time.Now())
-	p := NewPolicy(
-		WithPolicyRateLimiter(NewRateLimiter(10000, 1000, WithRateLimiterClock(clk))),
-		WithPolicyCircuitBreaker(NewCircuitBreaker(WithCircuitBreakerClock(clk))),
-		WithPolicyRetry(NewRetry(WithMaxRetries(2), WithRetryClock(clk), WithJitter(0))),
-		WithPolicyBulkhead(NewBulkhead(100)),
+	clk := fakeclock.New(time.Now())
+	p := flowguard.NewPolicy(
+		flowguard.WithRateLimiter(ratelimit.NewTokenBucket(10000, 1000, ratelimit.WithClock(clk))),
+		flowguard.WithCircuitBreaker(circuitbreaker.New(circuitbreaker.WithClock(clk))),
+		flowguard.WithRetry(retry.New(retry.WithMaxRetries(2), retry.WithClock(clk), retry.WithJitter(0))),
+		flowguard.WithBulkhead(bulkhead.New(100)),
 	)
 
 	for i := 0; i < 20; i++ {
