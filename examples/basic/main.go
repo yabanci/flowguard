@@ -7,14 +7,14 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/circuitbreaker"
 )
 
 func main() {
-	cb := flowguard.NewCircuitBreaker(
-		flowguard.WithFailureThreshold(3),
-		flowguard.WithOpenTimeout(10*time.Second),
-		flowguard.WithSuccessThreshold(2),
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(3),
+		circuitbreaker.WithOpenTimeout(10*time.Second),
+		circuitbreaker.WithSuccessThreshold(2),
 	)
 
 	ctx := context.Background()

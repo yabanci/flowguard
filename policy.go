@@ -2,89 +2,87 @@ package flowguard
 
 import (
 	"context"
+
+	"github.com/yabanci/flowguard/bulkhead"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/hedge"
+	"github.com/yabanci/flowguard/observer"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
-// Policy composes rate limiter, circuit breaker, and retry into a single
-// call wrapper. All components are optional — you can use just a limiter,
-// or just retry, or any combination.
+// Policy composes the flowguard primitives into a single call wrapper.
+// All components are optional — pass only the ones you want.
 //
-// Execution order: Retry → CircuitBreaker → RateLimiter → fn()
+// Execution order (outside → inside):
 //
-// Why this order:
-//   - Retry wraps everything so it can retry on transient failures
-//   - Circuit breaker is checked next — no point retrying if circuit is open
-//   - Rate limiter goes last to control actual outgoing RPS
-//   - Rate limit rejections do NOT count as circuit breaker failures
-//     (that would be silly — your own limiter shouldn't trip your own breaker)
+//	Fallback → Retry → Hedge → CircuitBreaker → Bulkhead → RateLimiter → fn
+//
+// Rate-limit rejections intentionally do NOT count as circuit breaker
+// failures — your own limiter shouldn't trip your own breaker.
 type Policy struct {
-	rl       *RateLimiter
-	cb       *CircuitBreaker
-	retry    *Retry
-	hedge    *Hedge
-	bulkhead *Bulkhead
+	rl       *ratelimit.Limiter
+	cb       *circuitbreaker.Breaker
+	retry    *retry.Retry
+	hedge    *hedge.Hedge
+	bulkhead *bulkhead.Bulkhead
 	fallback func(ctx context.Context, err error) error
-	observer Observer
+	observer observer.Observer
 }
 
-// PolicyOption configures a Policy.
-type PolicyOption func(*Policy)
+// Option configures a Policy.
+type Option func(*Policy)
 
-// NewPolicy creates a policy. Add components with WithPolicy* options.
-func NewPolicy(opts ...PolicyOption) *Policy {
-	p := &Policy{
-		observer: noopObserver{},
-	}
+// NewPolicy creates a policy. Add components with the With* options.
+func NewPolicy(opts ...Option) *Policy {
+	p := &Policy{observer: observer.Noop{}}
 	for _, opt := range opts {
 		opt(p)
 	}
 	return p
 }
 
-// WithPolicyRateLimiter adds a rate limiter to the policy.
-func WithPolicyRateLimiter(rl *RateLimiter) PolicyOption {
+// WithRateLimiter attaches a rate limiter.
+func WithRateLimiter(rl *ratelimit.Limiter) Option {
 	return func(p *Policy) { p.rl = rl }
 }
 
-// WithPolicyCircuitBreaker adds a circuit breaker to the policy.
-func WithPolicyCircuitBreaker(cb *CircuitBreaker) PolicyOption {
+// WithCircuitBreaker attaches a circuit breaker.
+func WithCircuitBreaker(cb *circuitbreaker.Breaker) Option {
 	return func(p *Policy) { p.cb = cb }
 }
 
-// WithPolicyRetry adds retry logic to the policy.
-func WithPolicyRetry(r *Retry) PolicyOption {
+// WithRetry attaches a retry.
+func WithRetry(r *retry.Retry) Option {
 	return func(p *Policy) { p.retry = r }
 }
 
-// WithPolicyHedge adds hedged requests to the policy.
-func WithPolicyHedge(h *Hedge) PolicyOption {
+// WithHedge attaches a hedger.
+func WithHedge(h *hedge.Hedge) Option {
 	return func(p *Policy) { p.hedge = h }
 }
 
-// WithPolicyBulkhead adds a bulkhead (concurrency limiter) to the policy.
-func WithPolicyBulkhead(b *Bulkhead) PolicyOption {
+// WithBulkhead attaches a bulkhead.
+func WithBulkhead(b *bulkhead.Bulkhead) Option {
 	return func(p *Policy) { p.bulkhead = b }
 }
 
-// WithPolicyFallback sets a fallback function that runs when everything else fails.
-// The fallback receives the original error so it can decide what to do.
-func WithPolicyFallback(fn func(ctx context.Context, err error) error) PolicyOption {
+// WithFallback sets a fallback that runs when everything else fails.
+// The fallback receives the original error so it can decide what to do
+// (return a cached response, a default value, or the error itself).
+func WithFallback(fn func(ctx context.Context, err error) error) Option {
 	return func(p *Policy) { p.fallback = fn }
 }
 
-// WithPolicyObserver attaches an observer to the policy itself.
-func WithPolicyObserver(o Observer) PolicyOption {
+// WithObserver attaches an observer to the policy itself.
+func WithObserver(o observer.Observer) Option {
 	return func(p *Policy) { p.observer = o }
 }
 
-// Do runs fn through all configured components.
-//
-// Execution order (outside → inside):
-//
-//	Fallback → Retry → Hedge → CircuitBreaker → Bulkhead → RateLimiter → fn()
+// Do runs fn through every configured component.
 func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) error {
 	wrapped := fn
 
-	// bulkhead (innermost, right before the actual call)
 	if p.bulkhead != nil {
 		inner := wrapped
 		wrapped = func(ctx context.Context) error {
@@ -99,13 +97,12 @@ func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) err
 		wrapped = func(ctx context.Context) error {
 			if err := p.rl.Wait(ctx); err != nil {
 				p.observer.OnRateLimited()
-				return ErrRateLimited
+				return ratelimit.ErrLimited
 			}
 			return inner(ctx)
 		}
 	}
 
-	// hedged requests
 	if p.hedge != nil {
 		inner := wrapped
 		wrapped = func(ctx context.Context) error {
@@ -113,23 +110,21 @@ func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) err
 		}
 	}
 
-	// retry
 	if p.retry != nil {
 		inner := wrapped
 		wrapped = func(ctx context.Context) error {
 			return p.retry.Do(ctx, func(ctx context.Context) error {
 				err := inner(ctx)
-				if err == ErrCircuitOpen {
-					return &permanentError{err}
+				if err == circuitbreaker.ErrOpen {
+					return retry.Permanent(err)
 				}
 				return err
 			})
 		}
 	}
 
-	err := unwrapPermanent(wrapped(ctx))
+	err := retry.Unwrap(wrapped(ctx))
 
-	// fallback — last resort
 	if err != nil && p.fallback != nil {
 		return p.fallback(ctx, err)
 	}
@@ -137,19 +132,18 @@ func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) err
 	return err
 }
 
-// buildCBWrapped builds the correct CB + RL wrapping.
-// Separated out because the inline version was getting gnarly.
+// buildCBWrapped wires the rate limiter inside the circuit breaker so
+// that rate-limit rejections do NOT register as breaker failures.
 func (p *Policy) buildCBWrapped(fn func(ctx context.Context) error) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		var rlErr error
 
 		cbErr := p.cb.Do(ctx, func(ctx context.Context) error {
-			// rate limit check
 			if p.rl != nil {
 				if err := p.rl.Wait(ctx); err != nil {
 					p.observer.OnRateLimited()
-					rlErr = ErrRateLimited
-					return nil // don't tell CB about rate limit failures
+					rlErr = ratelimit.ErrLimited
+					return nil
 				}
 			}
 			return fn(ctx)
@@ -160,19 +154,4 @@ func (p *Policy) buildCBWrapped(fn func(ctx context.Context) error) func(ctx con
 		}
 		return rlErr
 	}
-}
-
-// --- error wrappers ---
-
-// permanentError wraps errors that retry should not retry
-type permanentError struct{ inner error }
-
-func (e *permanentError) Error() string { return e.inner.Error() }
-func (e *permanentError) Unwrap() error { return e.inner }
-
-func unwrapPermanent(err error) error {
-	if p, ok := err.(*permanentError); ok {
-		return p.inner
-	}
-	return err
 }

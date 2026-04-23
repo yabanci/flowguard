@@ -8,19 +8,22 @@ import (
 	"time"
 
 	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/loadshed"
+	"github.com/yabanci/flowguard/middleware"
+	"github.com/yabanci/flowguard/ratelimit"
 )
 
 func main() {
 	// server-side policy: rate limit + load shed
-	rl := flowguard.NewRateLimiter(100, 200) // 100 req/s, burst 200
-	ls := flowguard.NewLoadShedder(50, 100*time.Millisecond)
+	rl := ratelimit.NewTokenBucket(100, 200) // 100 req/s, burst 200
+	ls := loadshed.New(50, 100*time.Millisecond)
 
 	// wrap load shedder in a policy (it's not a Policy component, so we use
 	// a separate middleware layer — TODO: maybe add to Policy later)
 	_ = ls
 
 	policy := flowguard.NewPolicy(
-		flowguard.WithPolicyRateLimiter(rl),
+		flowguard.WithRateLimiter(rl),
 	)
 
 	mux := http.NewServeMux()
@@ -30,7 +33,7 @@ func main() {
 		fmt.Fprintf(w, `{"status": "ok"}`)
 	})
 
-	protected := flowguard.HTTPMiddleware(policy)(mux)
+	protected := middleware.HTTPServer(policy)(mux)
 
 	fmt.Println("listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", protected))

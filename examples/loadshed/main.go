@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/loadshed"
 )
 
 func main() {
-	ls := flowguard.NewLoadShedder(
+	ls := loadshed.New(
 		20,                  // initial concurrency limit
 		50*time.Millisecond, // latency threshold
-		flowguard.WithLoadShedLimits(5, 100),
+		loadshed.WithLimits(5, 100),
 	)
 
 	// simulate bursts of traffic

@@ -32,12 +32,20 @@ Requires Go 1.21+.
 ## Quick Start
 
 ```go
+import (
+    "github.com/yabanci/flowguard"
+    "github.com/yabanci/flowguard/bulkhead"
+    "github.com/yabanci/flowguard/circuitbreaker"
+    "github.com/yabanci/flowguard/ratelimit"
+    "github.com/yabanci/flowguard/retry"
+)
+
 policy := flowguard.NewPolicy(
-    flowguard.WithPolicyRateLimiter(flowguard.NewRateLimiter(10, 20)),
-    flowguard.WithPolicyCircuitBreaker(flowguard.NewCircuitBreaker()),
-    flowguard.WithPolicyRetry(flowguard.NewRetry()),
-    flowguard.WithPolicyBulkhead(flowguard.NewBulkhead(50)),
-    flowguard.WithPolicyFallback(func(ctx context.Context, err error) error {
+    flowguard.WithRateLimiter(ratelimit.NewTokenBucket(10, 20)),
+    flowguard.WithCircuitBreaker(circuitbreaker.New()),
+    flowguard.WithRetry(retry.New()),
+    flowguard.WithBulkhead(bulkhead.New(50)),
+    flowguard.WithFallback(func(ctx context.Context, err error) error {
         return cachedResponse() // serve stale data
     }),
 )
@@ -47,19 +55,24 @@ err := policy.Do(ctx, func(ctx context.Context) error {
 })
 ```
 
+The root `flowguard` package only owns `Policy`. Every primitive lives in
+its own subpackage and is usable standalone: `ratelimit`, `circuitbreaker`,
+`retry`, `hedge`, `bulkhead`, `loadshed`, `middleware`, plus `observer`
+and `clock` for the shared interfaces.
+
 ## Rate Limiter
 
-Three strategies, same interface:
+Three strategies, same `*ratelimit.Limiter` type:
 
 ```go
 // Token bucket — classic, good default
-rl := flowguard.NewRateLimiter(rate, burst)
+rl := ratelimit.NewTokenBucket(rate, burst)
 
 // Sliding window — fixed memory, good for API quotas
-rl := flowguard.NewSlidingWindowLimiter(100, time.Minute)
+rl := ratelimit.NewSlidingWindow(100, time.Minute)
 
 // AIMD — adapts to backpressure, like TCP congestion control
-rl := flowguard.NewAIMDLimiter(10, 2, 50)
+rl := ratelimit.NewAIMD(10, 2, 50)
 ```
 
 ```go
@@ -73,7 +86,7 @@ rl.Reserve()            // how long until next token (without consuming)
 Adapts the rate limit based on success/failure signals — same algorithm TCP uses for congestion control.
 
 ```go
-rl := flowguard.NewAIMDLimiter(10, 2, 50)
+rl := ratelimit.NewAIMD(10, 2, 50)
 rl.OnSuccess()  // limit goes up by 1
 rl.OnFailure()  // limit halves
 ```
@@ -86,13 +99,13 @@ Two modes: classic (consecutive failures) and adaptive (error rate over a slidin
 
 ```go
 // Classic — trips after 5 consecutive failures
-cb := flowguard.NewCircuitBreaker(
-    flowguard.WithFailureThreshold(5),
-    flowguard.WithOpenTimeout(30 * time.Second),
+cb := circuitbreaker.New(
+    circuitbreaker.WithFailureThreshold(5),
+    circuitbreaker.WithOpenTimeout(30 * time.Second),
 )
 
 // Adaptive — trips when error rate exceeds 50% over last 100 calls
-cb := flowguard.NewAdaptiveCircuitBreaker(100, 0.5, 10)
+cb := circuitbreaker.NewAdaptive(100, 0.5, 10)
 ```
 
 The adaptive mode is way more robust — a single success doesn't reset the failure counter. It tracks the actual error rate over a sliding window and trips when things are genuinely broken.
@@ -107,28 +120,28 @@ cb.State()      // Closed, Open, or HalfOpen
 If the primary call is slow, fire a second one after a delay and take whichever finishes first. Dramatically reduces tail latency.
 
 ```go
-h := flowguard.NewHedge(50 * time.Millisecond) // hedge after P95 latency
+h := hedge.New(50 * time.Millisecond) // hedge after P95 latency
 
 err := h.Do(ctx, func(ctx context.Context) error {
     return callService(ctx) // must be idempotent!
 })
 ```
 
-If primary fails immediately, the hedge fires right away instead of waiting. Use `WithMaxHedges(2)` for up to 3 total attempts.
+If primary fails immediately, the hedge fires right away instead of waiting. Use `hedge.WithMaxHedges(2)` for up to 3 total attempts.
 
 ## Bulkhead
 
 Limits concurrent access to prevent one slow dependency from eating all goroutines.
 
 ```go
-b := flowguard.NewBulkhead(50,
-    flowguard.WithMaxWaitDuration(100 * time.Millisecond),
+b := bulkhead.New(50,
+    bulkhead.WithMaxWait(100 * time.Millisecond),
 )
 
 err := b.Do(ctx, func(ctx context.Context) error {
     return callSlowService(ctx)
 })
-// err is ErrBulkheadFull if all slots taken
+// err is bulkhead.ErrFull if all slots taken
 ```
 
 ## Load Shedding
@@ -136,16 +149,16 @@ err := b.Do(ctx, func(ctx context.Context) error {
 Server-side adaptive concurrency limiting. Uses AIMD to find the right concurrency level automatically — increases on success, halves on latency spikes or errors.
 
 ```go
-ls := flowguard.NewLoadShedder(
+ls := loadshed.New(
     20,                  // initial limit
     100*time.Millisecond, // latency threshold
-    flowguard.WithLoadShedLimits(5, 200),
+    loadshed.WithLimits(5, 200),
 )
 
 err := ls.Do(ctx, func(ctx context.Context) error {
     return handleRequest(ctx)
 })
-// err is ErrLoadShed if server is overloaded
+// err is loadshed.ErrShed if server is overloaded
 ```
 
 ## HTTP Middleware
@@ -155,46 +168,50 @@ Drop-in protection for HTTP servers and clients:
 ```go
 // Server middleware
 policy := flowguard.NewPolicy(
-    flowguard.WithPolicyRateLimiter(flowguard.NewRateLimiter(100, 200)),
-    flowguard.WithPolicyBulkhead(flowguard.NewBulkhead(50)),
+    flowguard.WithRateLimiter(ratelimit.NewTokenBucket(100, 200)),
+    flowguard.WithBulkhead(bulkhead.New(50)),
 )
-protected := flowguard.HTTPMiddleware(policy)(mux)
+protected := middleware.HTTPServer(policy)(mux)
 http.ListenAndServe(":8080", protected)
 ```
 
 ```go
 // Client middleware
 client := &http.Client{
-    Transport: flowguard.HTTPClientMiddleware(policy)(http.DefaultTransport),
+    Transport: middleware.HTTPClient(policy)(http.DefaultTransport),
 }
 ```
 
-The server middleware maps errors to HTTP status codes: `429` for rate limiting, `503` for circuit open / bulkhead full / load shed.
+The server middleware maps errors to HTTP status codes: `429` for rate limiting, `503` for circuit open / bulkhead full / load shed. `middleware.StatusFor(err)` exposes the mapping if you roll your own handler.
 
 ## Retry
 
 ```go
-r := flowguard.NewRetry(
-    flowguard.WithMaxRetries(3),
-    flowguard.WithExponentialBackoff(100 * time.Millisecond),
-    flowguard.WithMaxBackoff(30 * time.Second),
-    flowguard.WithJitter(0.2),
-    flowguard.WithRetryIf(func(err error) bool {
+r := retry.New(
+    retry.WithMaxRetries(3),
+    retry.WithExponentialBackoff(100 * time.Millisecond),
+    retry.WithMaxBackoff(30 * time.Second),
+    retry.WithJitter(0.2),
+    retry.WithRetryIf(func(err error) bool {
         return isTransient(err)
     }),
 )
 ```
 
+Wrap an error with `retry.Permanent(err)` to stop retrying on it.
+
 ## Observability
 
-Implement the `Observer` interface to hook into your metrics:
+Implement `observer.Observer` to hook into your metrics:
 
 ```go
+import "github.com/yabanci/flowguard/observer"
+
 type Observer interface {
     OnSuccess(latency time.Duration)
     OnFailure(err error, latency time.Duration)
     OnRetry(attempt int, err error)
-    OnStateChange(from, to State)
+    OnStateChange(from, to observer.State)
     OnRateLimited()
 }
 ```

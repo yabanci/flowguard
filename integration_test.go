@@ -1,4 +1,4 @@
-package flowguard
+package flowguard_test
 
 import (
 	"context"
@@ -11,6 +11,17 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/bulkhead"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/hedge"
+	"github.com/yabanci/flowguard/internal/fakeclock"
+	"github.com/yabanci/flowguard/loadshed"
+	"github.com/yabanci/flowguard/middleware"
+	"github.com/yabanci/flowguard/observer"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
 // --- end-to-end integration tests ---
@@ -19,23 +30,23 @@ import (
 func TestIntegration_PolicyFullStack_RetryThenRecover(t *testing.T) {
 	// Scenario: service fails 3 times, then recovers.
 	// Policy should retry through the failures and succeed.
-	clk := newMockClock(time.Now())
+	clk := fakeclock.New(time.Now())
 
-	rl := NewRateLimiter(1000, 100, WithRateLimiterClock(clk))
-	cb := NewCircuitBreaker(
-		WithFailureThreshold(10), // high threshold so it doesn't trip
-		WithCircuitBreakerClock(clk),
+	rl := ratelimit.NewTokenBucket(1000, 100, ratelimit.WithClock(clk))
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(10), // high threshold so it doesn't trip
+		circuitbreaker.WithClock(clk),
 	)
-	r := NewRetry(
-		WithMaxRetries(5),
-		WithRetryClock(clk),
-		WithJitter(0),
+	r := retry.New(
+		retry.WithMaxRetries(5),
+		retry.WithClock(clk),
+		retry.WithJitter(0),
 	)
 
-	p := NewPolicy(
-		WithPolicyRateLimiter(rl),
-		WithPolicyCircuitBreaker(cb),
-		WithPolicyRetry(r),
+	p := flowguard.NewPolicy(
+		flowguard.WithRateLimiter(rl),
+		flowguard.WithCircuitBreaker(cb),
+		flowguard.WithRetry(r),
 	)
 
 	calls := 0
@@ -53,7 +64,7 @@ func TestIntegration_PolicyFullStack_RetryThenRecover(t *testing.T) {
 	if calls != 4 {
 		t.Fatalf("expected 4 calls (3 failures + 1 success), got %d", calls)
 	}
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("CB should still be closed")
 	}
 }
@@ -61,21 +72,21 @@ func TestIntegration_PolicyFullStack_RetryThenRecover(t *testing.T) {
 func TestIntegration_CBTripsAndRetryStops(t *testing.T) {
 	// Scenario: CB trips mid-retry. Retry should stop immediately
 	// because retrying an open CB is pointless.
-	clk := newMockClock(time.Now())
+	clk := fakeclock.New(time.Now())
 
-	cb := NewCircuitBreaker(
-		WithFailureThreshold(2),
-		WithCircuitBreakerClock(clk),
+	cb := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(2),
+		circuitbreaker.WithClock(clk),
 	)
-	r := NewRetry(
-		WithMaxRetries(10),
-		WithRetryClock(clk),
-		WithJitter(0),
+	r := retry.New(
+		retry.WithMaxRetries(10),
+		retry.WithClock(clk),
+		retry.WithJitter(0),
 	)
 
-	p := NewPolicy(
-		WithPolicyCircuitBreaker(cb),
-		WithPolicyRetry(r),
+	p := flowguard.NewPolicy(
+		flowguard.WithCircuitBreaker(cb),
+		flowguard.WithRetry(r),
 	)
 
 	calls := 0
@@ -85,23 +96,23 @@ func TestIntegration_CBTripsAndRetryStops(t *testing.T) {
 	})
 
 	// CB trips after 2 failures, retry should stop
-	if !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("expected ErrCircuitOpen, got: %v", err)
+	if !errors.Is(err, circuitbreaker.ErrOpen) {
+		t.Fatalf("expected circuitbreaker.ErrOpen, got: %v", err)
 	}
-	// should be 2 actual calls (CB trips) + retry sees ErrCircuitOpen and stops
+	// should be 2 actual calls (CB trips) + retry sees circuitbreaker.ErrOpen and stops
 	if calls != 2 {
 		t.Fatalf("expected 2 calls before CB tripped, got %d", calls)
 	}
 }
 
 func TestIntegration_FallbackAfterAllRetriesFail(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(WithMaxRetries(2), WithRetryClock(clk), WithJitter(0))
+	clk := fakeclock.New(time.Now())
+	r := retry.New(retry.WithMaxRetries(2), retry.WithClock(clk), retry.WithJitter(0))
 
 	var fallbackErr error
-	p := NewPolicy(
-		WithPolicyRetry(r),
-		WithPolicyFallback(func(ctx context.Context, err error) error {
+	p := flowguard.NewPolicy(
+		flowguard.WithRetry(r),
+		flowguard.WithFallback(func(ctx context.Context, err error) error {
 			fallbackErr = err
 			return nil // recover with fallback
 		}),
@@ -122,8 +133,8 @@ func TestIntegration_FallbackAfterAllRetriesFail(t *testing.T) {
 func TestIntegration_BulkheadPreventsOverload(t *testing.T) {
 	// Scenario: 10 concurrent requests, bulkhead allows 3.
 	// 7 should be rejected.
-	b := NewBulkhead(3, WithMaxWaitDuration(0))
-	p := NewPolicy(WithPolicyBulkhead(b))
+	b := bulkhead.New(3, bulkhead.WithMaxWait(0))
+	p := flowguard.NewPolicy(flowguard.WithBulkhead(b))
 
 	ctx := context.Background()
 	gate := make(chan struct{})
@@ -162,8 +173,8 @@ func TestIntegration_BulkheadPreventsOverload(t *testing.T) {
 func TestIntegration_LoadShedderConverges(t *testing.T) {
 	// Scenario: start with high limit, hammer with slow calls,
 	// limit should decrease. Then switch to fast calls, limit should recover.
-	ls := NewLoadShedder(50, 10*time.Millisecond,
-		WithLoadShedLimits(5, 100),
+	ls := loadshed.New(50, 10*time.Millisecond,
+		loadshed.WithLimits(5, 100),
 	)
 	ctx := context.Background()
 
@@ -196,12 +207,12 @@ func TestIntegration_LoadShedderConverges(t *testing.T) {
 func TestIntegration_AdaptiveCB_RealWorldScenario(t *testing.T) {
 	// Scenario: service starts degrading, CB trips,
 	// then service recovers, CB closes again.
-	clk := newMockClock(time.Now())
+	clk := fakeclock.New(time.Now())
 	// small window so failures dominate quickly
-	cb := NewAdaptiveCircuitBreaker(10, 0.5, 5,
-		WithOpenTimeout(5*time.Second),
-		WithSuccessThreshold(3),
-		WithCircuitBreakerClock(clk),
+	cb := circuitbreaker.NewAdaptive(10, 0.5, 5,
+		circuitbreaker.WithOpenTimeout(5*time.Second),
+		circuitbreaker.WithSuccessThreshold(3),
+		circuitbreaker.WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -212,7 +223,7 @@ func TestIntegration_AdaptiveCB_RealWorldScenario(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		cb.Do(ctx, ok)
 	}
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("should be closed during warmup")
 	}
 
@@ -225,13 +236,13 @@ func TestIntegration_AdaptiveCB_RealWorldScenario(t *testing.T) {
 	rate := cb.ErrorRate()
 	t.Logf("error rate after degradation: %.2f, state: %s", rate, cb.State())
 
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatalf("CB should have tripped at %.0f%% error rate", rate*100)
 	}
 
 	// wait for half-open
 	clk.Advance(6 * time.Second)
-	if cb.State() != StateHalfOpen {
+	if cb.State() != observer.StateHalfOpen {
 		t.Fatalf("expected HalfOpen, got %v", cb.State())
 	}
 
@@ -240,7 +251,7 @@ func TestIntegration_AdaptiveCB_RealWorldScenario(t *testing.T) {
 	cb.Do(ctx, ok)
 	cb.Do(ctx, ok)
 
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatalf("expected Closed after recovery, got %v", cb.State())
 	}
 }
@@ -248,13 +259,13 @@ func TestIntegration_AdaptiveCB_RealWorldScenario(t *testing.T) {
 // --- HTTP middleware integration tests ---
 
 func TestIntegration_HTTPServer_RateLimitReturns429(t *testing.T) {
-	rl := NewRateLimiter(1, 1) // 1 req/s, burst 1
-	p := NewPolicy(WithPolicyRateLimiter(rl))
+	rl := ratelimit.NewTokenBucket(1, 1) // 1 req/s, burst 1
+	p := flowguard.NewPolicy(flowguard.WithRateLimiter(rl))
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	server := httptest.NewServer(HTTPMiddleware(p)(handler))
+	server := httptest.NewServer(middleware.HTTPServer(p)(handler))
 	defer server.Close()
 
 	// first request should pass
@@ -293,14 +304,14 @@ func TestIntegration_HTTPClient_CircuitBreaker(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	cb := NewCircuitBreaker(WithFailureThreshold(5))
-	r := NewRetry(WithMaxRetries(4), WithExponentialBackoff(time.Millisecond), WithJitter(0))
-	p := NewPolicy(
-		WithPolicyCircuitBreaker(cb),
-		WithPolicyRetry(r),
+	cb := circuitbreaker.New(circuitbreaker.WithFailureThreshold(5))
+	r := retry.New(retry.WithMaxRetries(4), retry.WithExponentialBackoff(time.Millisecond), retry.WithJitter(0))
+	p := flowguard.NewPolicy(
+		flowguard.WithCircuitBreaker(cb),
+		flowguard.WithRetry(r),
 	)
 
-	transport := HTTPClientMiddleware(p)(http.DefaultTransport)
+	transport := middleware.HTTPClient(p)(http.DefaultTransport)
 	client := &http.Client{Transport: transport}
 
 	resp, err := client.Get(backend.URL)
@@ -316,7 +327,7 @@ func TestIntegration_HTTPClient_CircuitBreaker(t *testing.T) {
 }
 
 func TestIntegration_HTTPServer_LoadShed503(t *testing.T) {
-	ls := NewLoadShedder(1, time.Second, WithLoadShedLimits(1, 10))
+	ls := loadshed.New(1, time.Second, loadshed.WithLimits(1, 10))
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond) // hold the slot
@@ -330,7 +341,7 @@ func TestIntegration_HTTPServer_LoadShed503(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			writeErrorResponse(w, err)
+			w.WriteHeader(middleware.StatusFor(err))
 		}
 	})
 
@@ -375,7 +386,7 @@ func TestIntegration_HTTPServer_LoadShed503(t *testing.T) {
 // --- concurrent stress tests ---
 
 func TestConcurrent_RateLimiter(t *testing.T) {
-	rl := NewRateLimiter(1000, 100)
+	rl := ratelimit.NewTokenBucket(1000, 100)
 
 	var wg sync.WaitGroup
 	var allowed, rejected atomic.Int32
@@ -401,7 +412,7 @@ func TestConcurrent_RateLimiter(t *testing.T) {
 }
 
 func TestConcurrent_CircuitBreaker(t *testing.T) {
-	cb := NewCircuitBreaker(WithFailureThreshold(100))
+	cb := circuitbreaker.New(circuitbreaker.WithFailureThreshold(100))
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -420,7 +431,7 @@ func TestConcurrent_CircuitBreaker(t *testing.T) {
 	wg.Wait()
 
 	// should still be closed (threshold is 100)
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("should be closed")
 	}
 	counts := cb.GetCounts()
@@ -430,7 +441,7 @@ func TestConcurrent_CircuitBreaker(t *testing.T) {
 }
 
 func TestConcurrent_AdaptiveCB(t *testing.T) {
-	cb := NewAdaptiveCircuitBreaker(100, 0.9, 50)
+	cb := circuitbreaker.NewAdaptive(100, 0.9, 50)
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -449,13 +460,13 @@ func TestConcurrent_AdaptiveCB(t *testing.T) {
 	wg.Wait()
 
 	// 10% error < 90% threshold — should stay closed
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatalf("should be closed at 10%% error rate, got %v (rate=%.2f)", cb.State(), cb.ErrorRate())
 	}
 }
 
 func TestConcurrent_LoadShedder(t *testing.T) {
-	ls := NewLoadShedder(20, 50*time.Millisecond, WithLoadShedLimits(5, 100))
+	ls := loadshed.New(20, 50*time.Millisecond, loadshed.WithLimits(5, 100))
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -486,7 +497,7 @@ func TestConcurrent_LoadShedder(t *testing.T) {
 }
 
 func TestConcurrent_Bulkhead(t *testing.T) {
-	b := NewBulkhead(10, WithMaxWaitDuration(50*time.Millisecond))
+	b := bulkhead.New(10, bulkhead.WithMaxWait(50*time.Millisecond))
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -522,7 +533,7 @@ func TestConcurrent_Bulkhead(t *testing.T) {
 
 func TestEdge_PolicyNoComponents(t *testing.T) {
 	// Policy with nothing configured should just pass through
-	p := NewPolicy()
+	p := flowguard.NewPolicy()
 
 	err := p.Do(context.Background(), func(ctx context.Context) error {
 		return nil
@@ -541,8 +552,8 @@ func TestEdge_PolicyNoComponents(t *testing.T) {
 }
 
 func TestEdge_ZeroBurstRateLimiter(t *testing.T) {
-	clk := newMockClock(time.Now())
-	rl := NewRateLimiter(10, 0, WithRateLimiterClock(clk))
+	clk := fakeclock.New(time.Now())
+	rl := ratelimit.NewTokenBucket(10, 0, ratelimit.WithClock(clk))
 
 	// zero burst means no tokens available initially
 	if rl.Allow() {
@@ -558,7 +569,7 @@ func TestEdge_ZeroBurstRateLimiter(t *testing.T) {
 
 func TestEdge_CB_ZeroThreshold(t *testing.T) {
 	// failure threshold of 0 is technically invalid but shouldn't crash
-	cb := NewCircuitBreaker(WithFailureThreshold(0))
+	cb := circuitbreaker.New(circuitbreaker.WithFailureThreshold(0))
 	ctx := context.Background()
 
 	// should always trip since any consecutive failure count >= 0
@@ -567,8 +578,8 @@ func TestEdge_CB_ZeroThreshold(t *testing.T) {
 }
 
 func TestEdge_RetryZeroRetries(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(WithMaxRetries(0), WithRetryClock(clk))
+	clk := fakeclock.New(time.Now())
+	r := retry.New(retry.WithMaxRetries(0), retry.WithClock(clk))
 
 	calls := 0
 	err := r.Do(context.Background(), func(ctx context.Context) error {
@@ -586,7 +597,7 @@ func TestEdge_RetryZeroRetries(t *testing.T) {
 
 func TestEdge_HedgeZeroDelay(t *testing.T) {
 	// zero delay = fire hedge immediately
-	h := NewHedge(0)
+	h := hedge.New(0)
 
 	var calls atomic.Int32
 	err := h.Do(context.Background(), func(ctx context.Context) error {
@@ -608,25 +619,25 @@ func TestEdge_BulkheadZeroConcurrency(t *testing.T) {
 		}
 	}()
 
-	b := NewBulkhead(0, WithMaxWaitDuration(0))
+	b := bulkhead.New(0, bulkhead.WithMaxWait(0))
 	err := b.Do(context.Background(), func(ctx context.Context) error {
 		return nil
 	})
 	// should be rejected since no slots
-	if !errors.Is(err, ErrBulkheadFull) {
+	if !errors.Is(err, bulkhead.ErrFull) {
 		t.Logf("got: %v (may also panic, which is fine for invalid input)", err)
 	}
 }
 
 func TestEdge_StateString(t *testing.T) {
 	tests := []struct {
-		s    State
+		s    observer.State
 		want string
 	}{
-		{StateClosed, "closed"},
-		{StateOpen, "open"},
-		{StateHalfOpen, "half-open"},
-		{State(99), "unknown"},
+		{observer.StateClosed, "closed"},
+		{observer.StateOpen, "open"},
+		{observer.StateHalfOpen, "half-open"},
+		{observer.State(99), "unknown"},
 	}
 	for _, tt := range tests {
 		if got := tt.s.String(); got != tt.want {
@@ -640,18 +651,18 @@ func TestEdge_WriteErrorResponse_AllErrors(t *testing.T) {
 		err  error
 		code int
 	}{
-		{ErrRateLimited, 429},
-		{ErrCircuitOpen, 503},
-		{ErrBulkheadFull, 503},
-		{ErrLoadShed, 503},
+		{ratelimit.ErrLimited, 429},
+		{circuitbreaker.ErrOpen, 503},
+		{bulkhead.ErrFull, 503},
+		{loadshed.ErrShed, 503},
 		{errBoom, 500},
 	}
 
 	for _, tt := range tests {
 		rec := httptest.NewRecorder()
-		writeErrorResponse(rec, tt.err)
+		rec.Code = middleware.StatusFor(tt.err)
 		if rec.Code != tt.code {
-			t.Errorf("writeErrorResponse(%v) = %d, want %d", tt.err, rec.Code, tt.code)
+			t.Errorf("StatusFor(%v) = %d, want %d", tt.err, rec.Code, tt.code)
 		}
 	}
 }

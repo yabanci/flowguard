@@ -1,19 +1,22 @@
-package flowguard
+package circuitbreaker
 
 import (
 	"context"
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard/internal/fakeclock"
+	"github.com/yabanci/flowguard/observer"
 )
 
 var errBoom = errors.New("boom")
 
 func TestCB_ClosedToOpen(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
+	clk := fakeclock.New(time.Now())
+	cb := New(
 		WithFailureThreshold(3),
-		WithCircuitBreakerClock(clk),
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -23,23 +26,23 @@ func TestCB_ClosedToOpen(t *testing.T) {
 		cb.Do(ctx, fail)
 	}
 
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatalf("expected Open, got %v", cb.State())
 	}
 
 	// calls should be rejected now
 	err := cb.Do(ctx, func(ctx context.Context) error { return nil })
-	if !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("expected ErrCircuitOpen, got %v", err)
+	if !errors.Is(err, ErrOpen) {
+		t.Fatalf("expected ErrOpen, got %v", err)
 	}
 }
 
 func TestCB_OpenToHalfOpen(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
+	clk := fakeclock.New(time.Now())
+	cb := New(
 		WithFailureThreshold(2),
 		WithOpenTimeout(5*time.Second),
-		WithCircuitBreakerClock(clk),
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -48,25 +51,25 @@ func TestCB_OpenToHalfOpen(t *testing.T) {
 	cb.Do(ctx, fail)
 	cb.Do(ctx, fail)
 
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatal("should be open")
 	}
 
 	// advance past open timeout
 	clk.Advance(6 * time.Second)
 
-	if cb.State() != StateHalfOpen {
+	if cb.State() != observer.StateHalfOpen {
 		t.Fatalf("expected HalfOpen, got %v", cb.State())
 	}
 }
 
 func TestCB_HalfOpenToClosed(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
+	clk := fakeclock.New(time.Now())
+	cb := New(
 		WithFailureThreshold(2),
 		WithSuccessThreshold(2),
 		WithOpenTimeout(5*time.Second),
-		WithCircuitBreakerClock(clk),
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -83,17 +86,17 @@ func TestCB_HalfOpenToClosed(t *testing.T) {
 	cb.Do(ctx, ok)
 	cb.Do(ctx, ok)
 
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatalf("expected Closed, got %v", cb.State())
 	}
 }
 
 func TestCB_HalfOpenBackToOpen(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
+	clk := fakeclock.New(time.Now())
+	cb := New(
 		WithFailureThreshold(2),
 		WithOpenTimeout(5*time.Second),
-		WithCircuitBreakerClock(clk),
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -107,18 +110,18 @@ func TestCB_HalfOpenBackToOpen(t *testing.T) {
 	// fail in half-open → back to open
 	cb.Do(ctx, fail)
 
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatalf("expected Open after half-open failure, got %v", cb.State())
 	}
 }
 
 func TestCB_HalfOpenMaxCalls(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
+	clk := fakeclock.New(time.Now())
+	cb := New(
 		WithFailureThreshold(1),
 		WithHalfOpenMaxCalls(1),
 		WithOpenTimeout(time.Second),
-		WithCircuitBreakerClock(clk),
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -152,13 +155,13 @@ func TestCB_HalfOpenMaxCalls(t *testing.T) {
 }
 
 func TestCB_CustomTripFunc(t *testing.T) {
-	clk := newMockClock(time.Now())
+	clk := fakeclock.New(time.Now())
 	// trip when failure rate > 50% and at least 4 requests
-	cb := NewCircuitBreaker(
+	cb := New(
 		WithTripFunc(func(c Counts) bool {
 			return c.Requests >= 4 && c.TotalFailures*2 > c.Requests
 		}),
-		WithCircuitBreakerClock(clk),
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -170,22 +173,22 @@ func TestCB_CustomTripFunc(t *testing.T) {
 	cb.Do(ctx, fail)
 
 	// 3 requests, 2 failures — shouldn't trip yet (need 4+ requests)
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("shouldn't have tripped yet")
 	}
 
 	cb.Do(ctx, fail)
 	// 4 requests, 3 failures (75%) — should trip
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatal("should have tripped with custom func")
 	}
 }
 
 func TestCB_SuccessesResetCounter(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewCircuitBreaker(
+	clk := fakeclock.New(time.Now())
+	cb := New(
 		WithFailureThreshold(3),
-		WithCircuitBreakerClock(clk),
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -200,7 +203,7 @@ func TestCB_SuccessesResetCounter(t *testing.T) {
 	cb.Do(ctx, fail)
 	cb.Do(ctx, fail)
 	// only 2 consecutive now, not 4
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("should still be closed — success reset the counter")
 	}
 }
@@ -208,10 +211,10 @@ func TestCB_SuccessesResetCounter(t *testing.T) {
 // --- adaptive circuit breaker tests ---
 
 func TestAdaptiveCB_TripsOnErrorRate(t *testing.T) {
-	clk := newMockClock(time.Now())
+	clk := fakeclock.New(time.Now())
 	// trip when >50% of last 10 calls fail, need at least 5 samples
-	cb := NewAdaptiveCircuitBreaker(10, 0.5, 5,
-		WithCircuitBreakerClock(clk),
+	cb := NewAdaptive(10, 0.5, 5,
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -222,13 +225,13 @@ func TestAdaptiveCB_TripsOnErrorRate(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		cb.Do(ctx, fail)
 	}
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("shouldn't trip yet — not enough samples")
 	}
 
 	// 5th failure — now 5/5 = 100% error rate, should trip
 	cb.Do(ctx, fail)
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatalf("should have tripped, error rate is 100%%, state=%v", cb.State())
 	}
 
@@ -238,15 +241,15 @@ func TestAdaptiveCB_TripsOnErrorRate(t *testing.T) {
 	// succeed twice to close
 	cb.Do(ctx, ok)
 	cb.Do(ctx, ok)
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("should be closed after successes in half-open")
 	}
 }
 
 func TestAdaptiveCB_DoesNotTripBelowThreshold(t *testing.T) {
-	clk := newMockClock(time.Now())
-	cb := NewAdaptiveCircuitBreaker(20, 0.5, 10,
-		WithCircuitBreakerClock(clk),
+	clk := fakeclock.New(time.Now())
+	cb := NewAdaptive(20, 0.5, 10,
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -262,16 +265,16 @@ func TestAdaptiveCB_DoesNotTripBelowThreshold(t *testing.T) {
 	}
 
 	// 30% < 50% threshold — should stay closed
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("should stay closed at 30% error rate")
 	}
 }
 
 func TestAdaptiveCB_SlidingWindowEvicts(t *testing.T) {
-	clk := newMockClock(time.Now())
+	clk := fakeclock.New(time.Now())
 	// window of 5, trip at >50%, min 3 samples
-	cb := NewAdaptiveCircuitBreaker(5, 0.5, 3,
-		WithCircuitBreakerClock(clk),
+	cb := NewAdaptive(5, 0.5, 3,
+		WithClock(clk),
 	)
 
 	ctx := context.Background()
@@ -283,7 +286,7 @@ func TestAdaptiveCB_SlidingWindowEvicts(t *testing.T) {
 		cb.Do(ctx, fail)
 	}
 	// this trips it
-	if cb.State() != StateOpen {
+	if cb.State() != observer.StateOpen {
 		t.Fatal("should have tripped")
 	}
 
@@ -300,13 +303,13 @@ func TestAdaptiveCB_SlidingWindowEvicts(t *testing.T) {
 
 	// add 1 failure: [S, S, S, F] = 25% — still under 50%
 	cb.Do(ctx, fail)
-	if cb.State() != StateClosed {
+	if cb.State() != observer.StateClosed {
 		t.Fatal("should stay closed at 25%")
 	}
 }
 
 func TestAdaptiveCB_ErrorRate(t *testing.T) {
-	cb := NewAdaptiveCircuitBreaker(10, 0.8, 5)
+	cb := NewAdaptive(10, 0.8, 5)
 
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {

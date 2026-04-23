@@ -1,32 +1,37 @@
-package flowguard
+// Package bulkhead limits concurrent access to a resource so a slow
+// downstream cannot exhaust the caller's goroutines. Named after ship
+// bulkheads that contain flooding to one compartment.
+package bulkhead
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/yabanci/flowguard/observer"
 )
 
-// Bulkhead limits concurrent access to a resource. Think of it as a
-// bouncer at the door — only N goroutines get in at once, the rest
-// either wait or get rejected.
-//
-// This prevents a slow downstream from eating all your goroutines.
-// Named after ship bulkheads that contain flooding to one compartment.
+// ErrFull is returned when every concurrency slot is occupied and the
+// configured wait timeout has elapsed.
+var ErrFull = errors.New("flowguard/bulkhead: full")
+
+// Bulkhead is the concurrency limiter. Only maxConcurrent goroutines
+// run fn at once; the rest either wait or get rejected with ErrFull.
 type Bulkhead struct {
 	sem      chan struct{}
 	maxWait  time.Duration
-	observer Observer
+	observer observer.Observer
 }
 
-// BulkheadOption configures a Bulkhead.
-type BulkheadOption func(*Bulkhead)
+// Option configures a Bulkhead.
+type Option func(*Bulkhead)
 
-// NewBulkhead creates a bulkhead with the given max concurrency.
-// By default, callers wait indefinitely for a slot. Use WithMaxWaitDuration
-// to fail fast instead.
-func NewBulkhead(maxConcurrent int, opts ...BulkheadOption) *Bulkhead {
+// New creates a bulkhead with the given max concurrency.
+// By default, callers wait indefinitely for a slot. Use WithMaxWait to fail fast.
+func New(maxConcurrent int, opts ...Option) *Bulkhead {
 	b := &Bulkhead{
 		sem:      make(chan struct{}, maxConcurrent),
-		observer: noopObserver{},
+		observer: observer.Noop{},
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -34,14 +39,14 @@ func NewBulkhead(maxConcurrent int, opts ...BulkheadOption) *Bulkhead {
 	return b
 }
 
-// WithMaxWaitDuration sets how long callers wait for a slot before giving up.
+// WithMaxWait sets how long callers wait for a slot before giving up.
 // Zero means reject immediately if full (like a tryAcquire).
-func WithMaxWaitDuration(d time.Duration) BulkheadOption {
+func WithMaxWait(d time.Duration) Option {
 	return func(b *Bulkhead) { b.maxWait = d }
 }
 
-// WithBulkheadObserver attaches an observer.
-func WithBulkheadObserver(o Observer) BulkheadOption {
+// WithObserver attaches an observer.
+func WithObserver(o observer.Observer) Option {
 	return func(b *Bulkhead) { b.observer = o }
 }
 
@@ -71,18 +76,15 @@ func (b *Bulkhead) ActiveCount() int {
 }
 
 func (b *Bulkhead) acquire(ctx context.Context) error {
-	// fast path: try without blocking
 	select {
 	case b.sem <- struct{}{}:
 		return nil
 	default:
 	}
 
-	// slow path: wait with timeout
 	if b.maxWait == 0 {
-		// zero means don't wait at all
 		b.observer.OnRateLimited()
-		return ErrBulkheadFull
+		return ErrFull
 	}
 
 	timer := time.NewTimer(b.maxWait)
@@ -95,7 +97,7 @@ func (b *Bulkhead) acquire(ctx context.Context) error {
 		return ctx.Err()
 	case <-timer.C:
 		b.observer.OnRateLimited()
-		return ErrBulkheadFull
+		return ErrFull
 	}
 }
 

@@ -6,10 +6,15 @@ import (
 	"time"
 
 	"github.com/yabanci/flowguard"
+	"github.com/yabanci/flowguard/bulkhead"
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/loadshed"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
 func BenchmarkTokenBucketAllow(b *testing.B) {
-	rl := flowguard.NewRateLimiter(1e9, 1e9) // basically unlimited
+	rl := ratelimit.NewTokenBucket(1e9, 1e9) // basically unlimited
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rl.Allow()
@@ -17,7 +22,7 @@ func BenchmarkTokenBucketAllow(b *testing.B) {
 }
 
 func BenchmarkCircuitBreakerDo(b *testing.B) {
-	cb := flowguard.NewCircuitBreaker()
+	cb := circuitbreaker.New()
 	ctx := context.Background()
 	fn := func(ctx context.Context) error { return nil }
 	b.ResetTimer()
@@ -27,14 +32,14 @@ func BenchmarkCircuitBreakerDo(b *testing.B) {
 }
 
 func BenchmarkPolicyDo(b *testing.B) {
-	rl := flowguard.NewRateLimiter(1e9, 1e9)
-	cb := flowguard.NewCircuitBreaker()
-	r := flowguard.NewRetry()
+	rl := ratelimit.NewTokenBucket(1e9, 1e9)
+	cb := circuitbreaker.New()
+	r := retry.New()
 
 	p := flowguard.NewPolicy(
-		flowguard.WithPolicyRateLimiter(rl),
-		flowguard.WithPolicyCircuitBreaker(cb),
-		flowguard.WithPolicyRetry(r),
+		flowguard.WithRateLimiter(rl),
+		flowguard.WithCircuitBreaker(cb),
+		flowguard.WithRetry(r),
 	)
 
 	ctx := context.Background()
@@ -46,7 +51,7 @@ func BenchmarkPolicyDo(b *testing.B) {
 }
 
 func BenchmarkRateLimiterParallel(b *testing.B) {
-	rl := flowguard.NewRateLimiter(1e9, 1e9)
+	rl := ratelimit.NewTokenBucket(1e9, 1e9)
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			rl.Allow()
@@ -55,7 +60,7 @@ func BenchmarkRateLimiterParallel(b *testing.B) {
 }
 
 func BenchmarkCircuitBreakerParallel(b *testing.B) {
-	cb := flowguard.NewCircuitBreaker()
+	cb := circuitbreaker.New()
 	ctx := context.Background()
 	fn := func(ctx context.Context) error { return nil }
 
@@ -77,7 +82,7 @@ func BenchmarkBaseline(b *testing.B) {
 }
 
 func BenchmarkSlidingWindowAllow(b *testing.B) {
-	rl := flowguard.NewSlidingWindowLimiter(1e9, time.Second)
+	rl := ratelimit.NewSlidingWindow(1e9, time.Second)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rl.Allow()
@@ -85,7 +90,7 @@ func BenchmarkSlidingWindowAllow(b *testing.B) {
 }
 
 func BenchmarkBulkheadDo(b *testing.B) {
-	bh := flowguard.NewBulkhead(1e6)
+	bh := bulkhead.New(1e6)
 	ctx := context.Background()
 	fn := func(ctx context.Context) error { return nil }
 	b.ResetTimer()
@@ -95,7 +100,7 @@ func BenchmarkBulkheadDo(b *testing.B) {
 }
 
 func BenchmarkLoadShedderDo(b *testing.B) {
-	ls := flowguard.NewLoadShedder(1e6, time.Hour) // won't trigger decrease
+	ls := loadshed.New(1e6, time.Hour) // won't trigger decrease
 	ctx := context.Background()
 	fn := func(ctx context.Context) error { return nil }
 	b.ResetTimer()
@@ -105,7 +110,7 @@ func BenchmarkLoadShedderDo(b *testing.B) {
 }
 
 func BenchmarkAdaptiveCBDo(b *testing.B) {
-	cb := flowguard.NewAdaptiveCircuitBreaker(1000, 0.9, 100)
+	cb := circuitbreaker.NewAdaptive(1000, 0.9, 100)
 	ctx := context.Background()
 	fn := func(ctx context.Context) error { return nil }
 	b.ResetTimer()

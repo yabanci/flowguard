@@ -1,4 +1,4 @@
-package flowguard
+package retry
 
 import (
 	"context"
@@ -6,11 +6,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard/internal/fakeclock"
 )
 
 func TestRetry_SuccessNoRetry(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(WithRetryClock(clk))
+	clk := fakeclock.New(time.Now())
+	r := New(WithClock(clk))
 
 	calls := 0
 	err := r.Do(context.Background(), func(ctx context.Context) error {
@@ -26,8 +28,8 @@ func TestRetry_SuccessNoRetry(t *testing.T) {
 }
 
 func TestRetry_SuccessAfterFailures(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(WithMaxRetries(3), WithRetryClock(clk))
+	clk := fakeclock.New(time.Now())
+	r := New(WithMaxRetries(3), WithClock(clk))
 
 	calls := 0
 	err := r.Do(context.Background(), func(ctx context.Context) error {
@@ -46,8 +48,8 @@ func TestRetry_SuccessAfterFailures(t *testing.T) {
 }
 
 func TestRetry_ExhaustedRetries(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(WithMaxRetries(2), WithRetryClock(clk))
+	clk := fakeclock.New(time.Now())
+	r := New(WithMaxRetries(2), WithClock(clk))
 
 	err := r.Do(context.Background(), func(ctx context.Context) error {
 		return errBoom
@@ -65,12 +67,12 @@ func TestRetry_ExhaustedRetries(t *testing.T) {
 }
 
 func TestRetry_BackoffGrows(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(
+	clk := fakeclock.New(time.Now())
+	r := New(
 		WithMaxRetries(3),
 		WithExponentialBackoff(100*time.Millisecond),
 		WithJitter(0), // disable jitter for predictability
-		WithRetryClock(clk),
+		WithClock(clk),
 	)
 
 	start := clk.Now()
@@ -87,12 +89,12 @@ func TestRetry_BackoffGrows(t *testing.T) {
 }
 
 func TestRetry_ConstantBackoff(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(
+	clk := fakeclock.New(time.Now())
+	r := New(
 		WithMaxRetries(3),
 		WithConstantBackoff(50*time.Millisecond),
 		WithJitter(0),
-		WithRetryClock(clk),
+		WithClock(clk),
 	)
 
 	start := clk.Now()
@@ -108,14 +110,14 @@ func TestRetry_ConstantBackoff(t *testing.T) {
 }
 
 func TestRetry_RetryIf(t *testing.T) {
-	clk := newMockClock(time.Now())
+	clk := fakeclock.New(time.Now())
 
 	retryable := errors.New("retryable")
 	permanent := errors.New("permanent")
 
-	r := NewRetry(
+	r := New(
 		WithMaxRetries(5),
-		WithRetryClock(clk),
+		WithClock(clk),
 		WithRetryIf(func(err error) bool {
 			return errors.Is(err, retryable)
 		}),
@@ -139,8 +141,8 @@ func TestRetry_RetryIf(t *testing.T) {
 }
 
 func TestRetry_ContextCancelled(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(WithMaxRetries(10), WithRetryClock(clk))
+	clk := fakeclock.New(time.Now())
+	r := New(WithMaxRetries(10), WithClock(clk))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -155,8 +157,8 @@ func TestRetry_ContextCancelled(t *testing.T) {
 
 func TestRetry_ContextCancelledError(t *testing.T) {
 	// if fn returns context.Canceled, don't retry it
-	clk := newMockClock(time.Now())
-	r := NewRetry(WithMaxRetries(5), WithRetryClock(clk))
+	clk := fakeclock.New(time.Now())
+	r := New(WithMaxRetries(5), WithClock(clk))
 
 	calls := 0
 	err := r.Do(context.Background(), func(ctx context.Context) error {
@@ -172,13 +174,13 @@ func TestRetry_ContextCancelledError(t *testing.T) {
 }
 
 func TestRetry_MaxBackoffCap(t *testing.T) {
-	clk := newMockClock(time.Now())
-	r := NewRetry(
+	clk := fakeclock.New(time.Now())
+	r := New(
 		WithMaxRetries(5),
 		WithExponentialBackoff(1*time.Second),
 		WithMaxBackoff(3*time.Second),
 		WithJitter(0),
-		WithRetryClock(clk),
+		WithClock(clk),
 	)
 
 	start := clk.Now()

@@ -1,9 +1,16 @@
-package flowguard
+package flowguard_test
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/yabanci/flowguard/circuitbreaker"
+	"github.com/yabanci/flowguard/internal/fakeclock"
+	"github.com/yabanci/flowguard/loadshed"
+	"github.com/yabanci/flowguard/observer"
+	"github.com/yabanci/flowguard/ratelimit"
+	"github.com/yabanci/flowguard/retry"
 )
 
 func FuzzRateLimiter(f *testing.F) {
@@ -17,7 +24,7 @@ func FuzzRateLimiter(f *testing.F) {
 			t.Skip()
 		}
 
-		rl := NewRateLimiter(rate, burst)
+		rl := ratelimit.NewTokenBucket(rate, burst)
 
 		// should never panic
 		for i := 0; i < burst+5; i++ {
@@ -43,12 +50,12 @@ func FuzzCircuitBreaker(f *testing.F) {
 			t.Skip()
 		}
 
-		clk := newMockClock(time.Now())
-		cb := NewCircuitBreaker(
-			WithFailureThreshold(failThresh),
-			WithSuccessThreshold(successThresh),
-			WithOpenTimeout(time.Duration(timeout)*time.Millisecond),
-			WithCircuitBreakerClock(clk),
+		clk := fakeclock.New(time.Now())
+		cb := circuitbreaker.New(
+			circuitbreaker.WithFailureThreshold(failThresh),
+			circuitbreaker.WithSuccessThreshold(successThresh),
+			circuitbreaker.WithOpenTimeout(time.Duration(timeout)*time.Millisecond),
+			circuitbreaker.WithClock(clk),
 		)
 
 		ctx := context.Background()
@@ -66,7 +73,7 @@ func FuzzCircuitBreaker(f *testing.F) {
 
 		// check state is valid
 		s := cb.State()
-		if s != StateClosed && s != StateOpen && s != StateHalfOpen {
+		if s != observer.StateClosed && s != observer.StateOpen && s != observer.StateHalfOpen {
 			t.Fatalf("invalid state: %v", s)
 		}
 
@@ -75,7 +82,7 @@ func FuzzCircuitBreaker(f *testing.F) {
 		cb.Do(ctx, func(ctx context.Context) error { return nil })
 
 		s = cb.State()
-		if s != StateClosed && s != StateOpen && s != StateHalfOpen {
+		if s != observer.StateClosed && s != observer.StateOpen && s != observer.StateHalfOpen {
 			t.Fatalf("invalid state after recovery: %v", s)
 		}
 	})
@@ -94,13 +101,13 @@ func FuzzRetry(f *testing.F) {
 			t.Skip()
 		}
 
-		clk := newMockClock(time.Now())
-		r := NewRetry(
-			WithMaxRetries(maxRetries),
-			WithExponentialBackoff(time.Duration(backoffMs)*time.Millisecond),
-			WithMaxBackoff(time.Duration(backoffMs*10)*time.Millisecond),
-			WithJitter(0),
-			WithRetryClock(clk),
+		clk := fakeclock.New(time.Now())
+		r := retry.New(
+			retry.WithMaxRetries(maxRetries),
+			retry.WithExponentialBackoff(time.Duration(backoffMs)*time.Millisecond),
+			retry.WithMaxBackoff(time.Duration(backoffMs*10)*time.Millisecond),
+			retry.WithJitter(0),
+			retry.WithClock(clk),
 		)
 
 		calls := 0
@@ -149,10 +156,10 @@ func FuzzAdaptiveCB(f *testing.F) {
 
 		threshold := float64(thresholdPct) / 100.0
 
-		clk := newMockClock(time.Now())
-		cb := NewAdaptiveCircuitBreaker(windowSize, threshold, minSamples,
-			WithCircuitBreakerClock(clk),
-			WithOpenTimeout(time.Second),
+		clk := fakeclock.New(time.Now())
+		cb := circuitbreaker.NewAdaptive(windowSize, threshold, minSamples,
+			circuitbreaker.WithClock(clk),
+			circuitbreaker.WithOpenTimeout(time.Second),
 		)
 
 		ctx := context.Background()
@@ -162,7 +169,7 @@ func FuzzAdaptiveCB(f *testing.F) {
 
 		// should never panic, state should be valid
 		s := cb.State()
-		if s != StateClosed && s != StateOpen && s != StateHalfOpen {
+		if s != observer.StateClosed && s != observer.StateOpen && s != observer.StateHalfOpen {
 			t.Fatalf("invalid state: %v", s)
 		}
 
@@ -190,8 +197,8 @@ func FuzzLoadShedder(f *testing.F) {
 			t.Skip()
 		}
 
-		ls := NewLoadShedder(initialLimit, 50*time.Millisecond,
-			WithLoadShedLimits(minLimit, maxLimit),
+		ls := loadshed.New(initialLimit, 50*time.Millisecond,
+			loadshed.WithLimits(minLimit, maxLimit),
 		)
 
 		ctx := context.Background()
