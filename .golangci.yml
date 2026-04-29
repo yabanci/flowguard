@@ -1,20 +1,18 @@
+version: "2"
+
 linters:
+  default: none
   enable:
     - errcheck
     - gosec
     - govet
     - staticcheck
     - unused
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-    - path: benchmarks/
-      linters:
-        - errcheck
-    - path: examples/
-      linters:
-        - gosec
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+        linters: [errcheck, gosec, staticcheck]
+      - path: "benchmarks/"
+        linters: [errcheck]
+      - path: "examples/"
+        linters: [gosec, errcheck]
