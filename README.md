@@ -240,6 +240,27 @@ Measured on Apple M1, Go 1.21:
 
 **Why no dependencies?** These are infrastructure primitives. `sync.Mutex` + `time.Now()` + `chan struct{}` is all you need.
 
+## Changelog
+
+### v0.3.0 (upcoming)
+
+**Bug fixes:**
+- `retry`: replaced sleep goroutine with `clock.After(d)` — eliminates transient goroutine leak per retry attempt on context cancellation
+- `ratelimit.Wait`: same `clock.After` fix — no goroutine per sleep cycle
+- `ratelimit.NewAIMD`: clamps `min ≥ 1` — prevents permanent deadlock when `aimdCurrent` reaches 0 via halving
+- `loadshed.WithLimits`: clamps `min ≥ 1` — same class of bug
+- `policy.Do`: `buildCBWrapped` now receives `wrapped` (with bulkhead applied) instead of bare `fn` — bulkhead was silently discarded when both CB and BH were configured
+- `policy.Do`: bulkhead `ErrFull` is now treated the same as rate-limit rejections — does not count as a CB failure
+
+**API additions:**
+- `clock.Clock` interface gains `After(d time.Duration) <-chan time.Time` — enables context-cancellable sleeping without goroutines in dependent packages
+
+### v0.2.0
+
+Initial public release. All primitives stable.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

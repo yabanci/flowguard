@@ -49,8 +49,13 @@ func New(initialLimit int, latencyThreshold time.Duration, opts ...Option) *Shed
 }
 
 // WithLimits sets the min and max concurrency bounds.
+// min is clamped to 1: a zero minimum would allow the limit to reach 0,
+// making Do() permanently reject all requests with no recovery path.
 func WithLimits(min, max int) Option {
 	return func(s *Shedder) {
+		if min < 1 {
+			min = 1
+		}
 		s.minLimit = int64(min)
 		s.maxLimit = int64(max)
 	}
