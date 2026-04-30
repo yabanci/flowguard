@@ -156,16 +156,10 @@ func (r *Retry) Do(ctx context.Context, fn func(ctx context.Context) error) erro
 		r.observer.OnRetry(attempt+1, err)
 
 		delay := r.calcDelay(attempt)
-		sleepDone := make(chan struct{})
-		go func() {
-			r.clock.Sleep(delay)
-			close(sleepDone)
-		}()
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-sleepDone:
+		case <-r.clock.After(delay):
 		}
 	}
 

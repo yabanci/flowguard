@@ -108,6 +108,14 @@ func NewSlidingWindow(limit int, window time.Duration, opts ...Option) *Limiter 
 // On success the limit goes up by 1, on failure it gets halved.
 // initial/min/max define the range the limit can swing in.
 func NewAIMD(initial, min, max int, opts ...Option) *Limiter {
+	// Guard against min=0: aimdCurrent can reach 0 via halving, making
+	// aimdAllow() (0 >= 0 = true → reject) permanently block all traffic.
+	if min < 1 {
+		min = 1
+	}
+	if initial < min {
+		initial = min
+	}
 	l := &Limiter{
 		aimdCurrent: initial,
 		aimdMin:     min,

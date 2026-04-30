@@ -30,6 +30,18 @@ func (c *Clock) Sleep(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+// After advances the fake clock by d and returns a pre-filled channel.
+// In tests this is equivalent to Sleep — time advances instantly.
+func (c *Clock) After(d time.Duration) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	t := c.now
+	c.mu.Unlock()
+	ch <- t
+	return ch
+}
+
 // Advance moves the clock forward by d without the Sleep semantics.
 func (c *Clock) Advance(d time.Duration) {
 	c.mu.Lock()
