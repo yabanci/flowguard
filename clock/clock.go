@@ -19,6 +19,6 @@ func Real() Clock { return realClock{} }
 
 type realClock struct{}
 
-func (realClock) Now() time.Time                        { return time.Now() }
-func (realClock) Sleep(d time.Duration)                 { time.Sleep(d) }
+func (realClock) Now() time.Time                         { return time.Now() }
+func (realClock) Sleep(d time.Duration)                  { time.Sleep(d) }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
