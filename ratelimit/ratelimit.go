@@ -144,11 +144,10 @@ func (l *Limiter) Wait(ctx context.Context) error {
 			if ok {
 				return nil
 			}
-			dur := l.bucketWidth / 2
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-l.sleepChan(dur):
+			case <-l.clock.After(l.bucketWidth / 2):
 			}
 			continue
 		}
@@ -162,7 +161,7 @@ func (l *Limiter) Wait(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-l.sleepChan(100 * time.Millisecond):
+			case <-l.clock.After(100 * time.Millisecond):
 			}
 			continue
 		}
@@ -179,18 +178,9 @@ func (l *Limiter) Wait(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-l.sleepChan(wait):
+		case <-l.clock.After(wait):
 		}
 	}
-}
-
-func (l *Limiter) sleepChan(d time.Duration) <-chan time.Time {
-	ch := make(chan time.Time, 1)
-	go func() {
-		l.clock.Sleep(d)
-		ch <- l.clock.Now()
-	}()
-	return ch
 }
 
 // Allow tries to take a token without blocking. Returns true if allowed.
