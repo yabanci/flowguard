@@ -2,6 +2,7 @@ package flowguard
 
 import (
 	"context"
+	"errors"
 
 	"github.com/yabanci/flowguard/bulkhead"
 	"github.com/yabanci/flowguard/circuitbreaker"
@@ -91,7 +92,7 @@ func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) err
 	}
 
 	if p.cb != nil {
-		wrapped = p.buildCBWrapped(fn)
+		wrapped = p.buildCBWrapped(wrapped) // use wrapped, not fn — preserves bulkhead
 	} else if p.rl != nil {
 		inner := wrapped
 		wrapped = func(ctx context.Context) error {
@@ -132,26 +133,33 @@ func (p *Policy) Do(ctx context.Context, fn func(ctx context.Context) error) err
 	return err
 }
 
-// buildCBWrapped wires the rate limiter inside the circuit breaker so
-// that rate-limit rejections do NOT register as breaker failures.
+// buildCBWrapped wires the rate limiter and bulkhead inside the circuit
+// breaker so that capacity-limit rejections (ErrLimited, ErrFull) do NOT
+// register as breaker failures — your own limiter shouldn't trip your own CB.
 func (p *Policy) buildCBWrapped(fn func(ctx context.Context) error) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
-		var rlErr error
+		var shedErr error // capacity rejection: returned to caller but not to CB
 
 		cbErr := p.cb.Do(ctx, func(ctx context.Context) error {
 			if p.rl != nil {
 				if err := p.rl.Wait(ctx); err != nil {
 					p.observer.OnRateLimited()
-					rlErr = ratelimit.ErrLimited
-					return nil
+					shedErr = ratelimit.ErrLimited
+					return nil // don't count as CB failure
 				}
 			}
-			return fn(ctx)
+			err := fn(ctx)
+			// Bulkhead full: own capacity limit, don't trip the CB.
+			if errors.Is(err, bulkhead.ErrFull) {
+				shedErr = err
+				return nil
+			}
+			return err
 		})
 
 		if cbErr != nil {
 			return cbErr
 		}
-		return rlErr
+		return shedErr
 	}
 }
